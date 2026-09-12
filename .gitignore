@@ -1,0 +1,41 @@
+# --- secrets: never commit these -------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# --- dependencies / build ---------------------------------------------------
+node_modules/
+dist/
+*.tsbuildinfo
+
+# --- local run output -------------------------------------------------------
+# NOTE: /evidence/ is committed on purpose — it is a required deliverable (§6).
+# What is ignored here is the noisy local debugging output that is NOT evidence:
+# Playwright traces embed un-redacted DOM snapshots and cannot be masked after
+# capture, so they must never reach a public repo.
+#
+# ANCHORED to the repo root (/runs/, not runs/): an unanchored pattern matches a
+# directory of that name at ANY depth, so `runs/` silently swallowed
+# evidence/runs/ — the required deliverable — out of the first commit.
+/runs/
+/playwright-report/
+/test-results/
+trace.zip
+*.webm
+
+# --- os ---------------------------------------------------------------------
+.DS_Store
+
+# --- working documents ------------------------------------------------------
+# These are planning aids, not deliverables. Uncomment to keep them out of the
+# public submission; leave commented to ship them.
+assignment-map.html
+build-plan.html
+
+# --- not ours to republish ---------------------------------------------------
+# The assessment brief belongs to interface.ai; a public repo should not
+# redistribute it.
+Assignment A — Computer-Use Automation System.pdf
+
+# --- agent working notes -----------------------------------------------------
+CLAUDE.md

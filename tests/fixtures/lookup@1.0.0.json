@@ -1,0 +1,108 @@
+{
+  "_comment": "HAND-AUTHORED FIXTURE, not a discovered artifact. It lives in tests/fixtures rather than capabilities/ precisely so it cannot be mistaken for output of a real discovery run: its provenance says so, and verification.replayResult is 'not_yet_verified' until a replay stamps it. Its job is to prove the replay path can drive the mock before the discovery loop exists to produce the real thing.",
+  "schemaVersion": 1,
+  "contract": {
+    "id": "msc.member.lookup",
+    "version": "1.0.0",
+    "goal": "Look up a member by id and reach the results screen.",
+    "purpose": "The thinnest read-only flow on this surface: proves frame traversal, structural anchoring, and the business-outcome path without changing anything.",
+    "inputs": [
+      {
+        "name": "member_id",
+        "type": "string",
+        "pattern": "^\\d{9}$",
+        "required": true,
+        "sensitivity": "confidential",
+        "description": "Member account base number."
+      }
+    ],
+    "outputs": [],
+    "outcomes": [
+      {
+        "code": "MEMBER_NOT_FOUND",
+        "message": "No member matches that id.",
+        "when": {
+          "all": [
+            { "atom": "screen", "is": "MEMBER_RESULTS" },
+            { "atom": "text", "contains": "MSG 0071" }
+          ],
+          "any": []
+        },
+        "source": "app_profile",
+        "note": "The app's own message for an empty result set. A legitimate answer the caller asked for, not a failure."
+      }
+    ],
+    "risk": "read_only",
+    "requiresSession": false
+  },
+  "plan": {
+    "app": "MERIDIAN MSC",
+    "targets": [
+      {
+        "id": "MEMBER_ID",
+        "screen": "MEMBER_SEARCH",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/search$" }],
+        "strategies": [
+          { "kind": "table_anchor", "key": "MEMBER_ID", "matchedAtRecord": 1 },
+          { "kind": "field_key", "key": "MEMBER_ID", "matchedAtRecord": 1 }
+        ],
+        "verify": { "role": "textbox" },
+        "nameMayContainPii": false,
+        "robustness": "Anchored on the visible label cell rather than position: measured to survive both a frame rename and a field rename, where the field name survived neither."
+      },
+      {
+        "id": "SUBMIT",
+        "screen": "MEMBER_SEARCH",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/search$" }],
+        "strategies": [{ "kind": "field_key", "key": "SUBMIT", "matchedAtRecord": 1 }],
+        "verify": {},
+        "nameMayContainPii": false,
+        "robustness": "An image submit with an empty alt has no accessible name at all, so the app's own control name is the only stable handle this surface offers."
+      }
+    ],
+    "steps": [
+      {
+        "ref": "s01",
+        "title": "Enter the member id",
+        "action": "fill",
+        "target": "MEMBER_ID",
+        "value": "{{member_id}}",
+        "pre": { "all": [{ "atom": "screen", "is": "MEMBER_SEARCH" }], "any": [] },
+        "post": {
+          "all": [{ "atom": "valueEquals", "target": "MEMBER_ID", "value": "{{member_id}}" }],
+          "any": []
+        },
+        "risk": "read_only",
+        "approval": "none"
+      },
+      {
+        "ref": "s02",
+        "title": "Submit the search",
+        "action": "click",
+        "target": "SUBMIT",
+        "pre": { "all": [{ "atom": "screen", "is": "MEMBER_SEARCH" }], "any": [] },
+        "post": { "all": [{ "atom": "screen", "is": "MEMBER_RESULTS" }], "any": [] },
+        "risk": "read_only",
+        "approval": "none"
+      }
+    ],
+    "recovery": [],
+    "checkpoint": {
+      "all": [
+        { "atom": "screen", "is": "MEMBER_RESULTS" },
+        { "atom": "rowCount", "grid": "RESULTS_GRID", "op": "eq", "n": 1 }
+      ],
+      "any": []
+    }
+  },
+  "provenance": {
+    "discoveredAt": "2026-09-12T00:00:00Z",
+    "model": "none - hand-authored fixture, no model produced this",
+    "traceDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "appProfileVersion": "meridian-msc@4.2",
+    "modelAuthoredFields": []
+  },
+  "verification": {
+    "replayResult": "not_yet_verified"
+  }
+}

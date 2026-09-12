@@ -1,0 +1,142 @@
+{
+ "schemaVersion": 1,
+ "contract": {
+  "id": "msc.member.lookup",
+  "version": "1.0.0",
+  "goal": "Look up member 400200101",
+  "purpose": "Compiled from a discovery run of 2 executed step(s).",
+  "inputs": [],
+  "outputs": [],
+  "outcomes": [],
+  "risk": "read_only",
+  "requiresSession": false
+ },
+ "plan": {
+  "app": "MERIDIAN MSC",
+  "targets": [
+   {
+    "id": "MEMBER_ID",
+    "screen": "MEMBER_SEARCH",
+    "framePath": [
+     {
+      "name": "content"
+     }
+    ],
+    "strategies": [
+     {
+      "kind": "table_anchor",
+      "key": "MEMBER_ID",
+      "matchedAtRecord": 1
+     },
+     {
+      "kind": "field_key",
+      "key": "MEMBER_ID",
+      "matchedAtRecord": 1
+     }
+    ],
+    "verify": {
+     "role": "textbox"
+    },
+    "nameMayContainPii": false,
+    "robustness": "Model's stated reason: \"The MEMBER ID textbox is clearly labelled and is the only field in the content area that accepts member numbers, so it will remain visible.\". Anchors recorded from the live element: label \"MEMBER ID\", field \"MBRNO\"."
+   },
+   {
+    "id": "SUBMIT",
+    "screen": "MEMBER_SEARCH",
+    "framePath": [
+     {
+      "name": "content"
+     }
+    ],
+    "strategies": [
+     {
+      "kind": "field_key",
+      "key": "SUBMIT",
+      "matchedAtRecord": 1
+     }
+    ],
+    "verify": {
+     "role": "textbox"
+    },
+    "nameMayContainPii": false,
+    "robustness": "Model's stated reason: \"The Submit button is the primary action in the content area to initiate the search, and it will remain visible as the only button in the form.\". Anchors recorded from the live element: no label, field \"SUBMIT\"."
+   }
+  ],
+  "steps": [
+   {
+    "ref": "s01",
+    "title": "Enter member id",
+    "action": "fill",
+    "target": "MEMBER_ID",
+    "value": "400200101",
+    "pre": {
+     "all": [
+      {
+       "atom": "screen",
+       "is": "MEMBER_SEARCH"
+      }
+     ],
+     "any": []
+    },
+    "post": {
+     "all": [
+      {
+       "atom": "valueEquals",
+       "target": "MEMBER_ID",
+       "value": "400200101"
+      }
+     ],
+     "any": []
+    },
+    "risk": "read_only",
+    "approval": "none"
+   },
+   {
+    "ref": "s02",
+    "title": "Activate submit",
+    "action": "click",
+    "target": "SUBMIT",
+    "pre": {
+     "all": [
+      {
+       "atom": "screen",
+       "is": "MEMBER_SEARCH"
+      }
+     ],
+     "any": []
+    },
+    "post": {
+     "all": [
+      {
+       "atom": "screen",
+       "is": "MEMBER_RESULTS"
+      }
+     ],
+     "any": []
+    },
+    "risk": "read_only",
+    "approval": "none"
+   }
+  ],
+  "recovery": [],
+  "checkpoint": {
+   "all": [
+    {
+     "atom": "screen",
+     "is": "MEMBER_RESULTS"
+    }
+   ],
+   "any": []
+  }
+ },
+ "provenance": {
+  "discoveredAt": "2026-09-12T17:53:19.298Z",
+  "model": "glm-4.7-flash",
+  "traceDigest": "c746d8b2ebb8d738f76311d142532b6f3dcd5dab0c835637fe1c5c75cfd8d6bb",
+  "appProfileVersion": "meridian-msc@4.2",
+  "modelAuthoredFields": []
+ },
+ "verification": {
+  "replayResult": "not_yet_verified"
+ }
+}

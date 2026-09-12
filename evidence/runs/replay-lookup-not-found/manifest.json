@@ -1,0 +1,21 @@
+{
+ "runId": "replay-lookup-not-found",
+ "phase": "replay",
+ "startedAt": "2026-09-12T19:18:12.232Z",
+ "endedAt": "2026-09-12T19:18:18.808Z",
+ "target": "http://localhost:7101/",
+ "tenant": "fcu",
+ "capability": {
+  "id": "msc.member.lookup",
+  "version": "1.0.0"
+ },
+ "model": {
+  "provider": "none",
+  "calls": 0
+ },
+ "result": "business_outcome",
+ "versions": {
+  "node": "20.17.0",
+  "playwright": "1.63.0"
+ }
+}

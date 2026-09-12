@@ -1,0 +1,23 @@
+{
+  "tenant": "fcu",
+  "appVersion": "4.2",
+  "frames": { "content": "content", "nav": "nav" },
+  "screens": {
+    "SIGN_ON": "SEC0100",
+    "MENU": "MNU0200",
+    "MEMBER_SEARCH": "MBR0300",
+    "MEMBER_RESULTS": "MBR0310",
+    "MEMBER_DETAIL": "MBR0400"
+  },
+  "fields": {
+    "OPERATOR_ID": "OPRID",
+    "PASSCODE": "PASSWD",
+    "MEMBER_ID": "MBRNO",
+    "LAST_NAME": "LNAME",
+    "SUBMIT": "SUBMIT"
+  },
+  "labels": {
+    "MEMBER_ID": "MEMBER ID",
+    "LAST_NAME": "LAST NAME"
+  }
+}

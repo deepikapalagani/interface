@@ -1,0 +1,37 @@
+{
+  "name": "meridian-capability-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Records an LLM-driven run against a legacy back-office UI as a typed, versioned capability, then replays it deterministically with no model in the loop.",
+  "engines": {
+    "node": ">=20.17.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "mock": "tsx mock/main.ts --tenant a --port 7101",
+    "mock:b": "tsx mock/main.ts --tenant b --port 7102",
+    "mock:reset": "curl -fsS -X POST http://localhost:7101/__admin/reset && echo reset",
+    "mock:fault": "tsx scripts/fault.ts",
+    "discover": "tsx src/discover/main.ts",
+    "replay": "tsx src/replay/main.ts",
+    "operator": "tsx src/operator/main.ts --port 7900",
+    "demo": "tsx scripts/demo.ts",
+    "demo:offline": "tsx scripts/demo.ts --provider cassette",
+    "test": "vitest run",
+    "verify:no-llm": "tsx scripts/verify-no-llm.ts",
+    "verify:evidence": "tsx scripts/verify-evidence.ts",
+    "verify:determinism": "tsx scripts/verify-determinism.ts",
+    "verify": "npm run typecheck && npm run test && npm run verify:no-llm && npm run verify:evidence && npm run verify:determinism && npm run demo:offline"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "playwright": "1.63.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

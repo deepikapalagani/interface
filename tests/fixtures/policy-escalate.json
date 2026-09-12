@@ -1,0 +1,11 @@
+{
+  "_comment": "THE DEMO POLICY — how the escalation path is reached WITHOUT lying in an artifact and WITHOUT a mutating route. It is byte-for-byte the document src/replay/main.ts builds inline, plus ONE screenRule. lookup@1.0.0 stays truthfully read_only on every step; the POLICY rates mutating actions on the MEMBER SEARCH screen as irreversible, and riskHandling.irreversible='confirm' turns that into requires:'human' at policy.ts:130-131. That is precisely the riskDrift case policy.ts:123-124 exists for -- an artifact may never talk its risk DOWN, and here the policy talks it UP. It is kept OUT of the default policy on purpose: scripts/verify-determinism.ts spawns src/replay/main.ts with no flags across three read_only scenarios and compares bytes, so a default that could escalate would put a human turn inside the determinism corpus.",
+  "_screen_measured": "MEMBER_SEARCH, not MEMBER_RESULTS. MEASURED against the real mock: the gate is evaluated against the screen observed BEFORE the action (executor.ts:235-248 passes observation.screen), and lookup@1.0.0 takes no action while standing on MEMBER_RESULTS -- s02 clicks SUBMIT while still on MEMBER_SEARCH. A MEMBER_RESULTS rule therefore never fires on this capability and the escalation path would be unreachable, which is the one thing this fixture exists to avoid.",
+  "version": "1.0.0",
+  "allowedOrigins": ["http://localhost:7101"],
+  "deniedRoutes": ["/__admin"],
+  "allowedActions": ["navigate", "click", "fill", "press", "dismiss_dialog"],
+  "screenRules": [{ "screen": "MEMBER_SEARCH", "risk": "irreversible" }],
+  "riskHandling": { "read_only": "allow", "reversible": "allow", "irreversible": "confirm" },
+  "caps": { "maxSteps": 40, "maxRunSeconds": 120 }
+}
