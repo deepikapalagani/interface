@@ -50,7 +50,22 @@ export type ControlOwner = "automation" | "human";
  */
 export type Remediation = "retry_safe" | "do_not_retry" | "reconcile_required";
 
-/** What the run may have already changed in the target system. */
+/**
+ * What the run may have already changed in the target system.
+ *
+ * `committed` HAS NO PRODUCER. Every executor site answers `committed ? "unknown"
+ * : "none"` — the run-scoped flag means "a step that could commit was issued",
+ * which is exactly `unknown`, and nothing in this engine can observe that a
+ * commit definitely landed. By this file's own standard, twelve lines above,
+ * that makes it the same defect as `ControlOwner: "released"`: a state a caller
+ * can switch on and never reach.
+ *
+ * It is still declared because the reconciliation path (`plan.reconcile`) is the
+ * consumer that would produce it — a declared read-only probe establishing that
+ * the submit landed is precisely how `unknown` becomes `committed`. That path has
+ * no implementation, so the member is a named slot rather than a live state, and
+ * saying which one it is beats leaving a reader to discover it.
+ */
 export type SideEffectRisk = "none" | "unknown" | "committed";
 
 /**
@@ -70,12 +85,19 @@ export type FailureKind =
    * The capability's own contract was violated — by the ARTIFACT or the
    * invocation, not by the caller's arguments and not by the application.
    *
-   * Two live producers, both in `runSteps`:
+   * FOUR live producers, all in `runSteps` — this comment said "two" until a
+   * reviewer counted them, which is worth recording because an undercount here
+   * reads as a closed list and invites the next producer to be added silently:
    *   - a declared output was never populated, or the value read back could not
    *     be coerced to the type `contract.outputs[].type` declares;
    *   - a step interpolates `{{name}}` and no such parameter reached the
    *     executor, so the alternatives were to type the literal text `{{name}}`
-   *     into a live application or to refuse. It refuses.
+   *     into a live application or to refuse. It refuses;
+   *   - an ACTING step (`navigate`, `fill`, `click`) names no target, which the
+   *     schema's refinement 10 already forbids — so reaching it means an artifact
+   *     got past `parseCapability`, and failing loudly beats skipping the step;
+   *   - the same check at the read/assert branch, where a step's declared shape
+   *     and the executor's dispatch disagree.
    *
    * DISTINCT FROM `postcondition_failed`, which would tell a caller the
    * application misbehaved and send an engineer to look at the app. Here the app
@@ -123,6 +145,16 @@ export type FailureKind =
    * A human handed control back but the run could not re-establish its position.
    * Produced by `runSteps` when the step's postcondition still does not hold
    * after the turn, and when a step that already had its turn asks for another.
+   *
+   * A THIRD producer sits on the run-wide escalation budget, and it is the worst
+   * fit in this union: it fires when a step makes its FIRST escalation request
+   * after other steps have used the budget, so nothing about that step was ever
+   * "unresolved after handoff" — it never had one. Its `observed` string says so
+   * plainly ("the run has already used its N permitted escalation(s)"), which is
+   * the tell that it wants a kind of its own. Left as-is deliberately: inventing
+   * `escalation_budget_exhausted` is a contract change, and the failing run is
+   * already legible through the observed string. Recorded so the next reader
+   * knows the mismatch was seen rather than missed.
    */
   | "unresolved_after_handoff";
 

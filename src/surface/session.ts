@@ -8,15 +8,24 @@
  *
  * ── WHY THIS IS NOT PART OF `Surface` ───────────────────────────────────────
  *
- * MEASURED, not assumed (`grep -rn 'implements Surface' src tests`): `Surface`
- * has ELEVEN implementers — three real (`PlaywrightSurface`, `BoundSurface`,
- * `GatedSurface`) and eight test stubs (in tests/gate, predicate, classify,
- * discover-executor, discover-loop, outcome-signal, handoff and side-effect).
+ * MEASURED, not assumed — re-measure with
+ * `grep -rn 'implements Surface' src tests --exclude=session.ts`, and note the
+ * `--exclude`: without it this comment's own quotation of the pattern makes THIS
+ * FILE match the search, which is how the previous count came out one too high in
+ * the "real" column. A census that counts itself is the small, funny version of
+ * the defect this repo keeps having.
+ *
+ * `Surface` has THIRTEEN implementers: three real (`PlaywrightSurface`,
+ * `BoundSurface`, `GatedSurface`) and ten test stubs across nine files
+ * (tests/gate, predicate, classify, discover-executor, discover-loop, handoff,
+ * side-effect, recovery-wait, and outcome-signal, which declares two).
+ *
  * The count is deliberately re-measured rather than cited by line, because it
  * only ever grows: every new suite that drives the executor writes another stub.
- * Widening `Surface` would force all eight of those unrelated files to grow dead
- * methods they would never call, and would put a human-turn API on the interface
- * a desktop or 5250 adapter has to implement.
+ * It said ELEVEN until this pass, and had been wrong in both directions at once —
+ * stale by two stubs, and inflated by one phantom. Widening `Surface` would force
+ * all ten of those stubs to grow dead methods they would never call, and would put
+ * a human-turn API on the interface a desktop or 5250 adapter has to implement.
  *
  * Nothing that consumes `Surface` needs any of this. The executor drives steps;
  * the gate enforces policy; neither has a reason to paint a banner. Exactly one

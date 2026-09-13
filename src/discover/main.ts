@@ -23,7 +23,7 @@
  * compile can establish a step's risk, and both refuse rather than assume.
  */
 import { readFileSync } from "node:fs";
-import { Binding } from "../capability/bind.js";
+import { parseBinding } from "../capability/bind.js";
 import { safeParseCapability } from "../capability/schema.js";
 import { compileMechanical } from "../compile/mechanical.js";
 import { DEFAULT_RISK_PROFILE_PATH, loadRiskProfile } from "../compile/risk-profile.js";
@@ -105,7 +105,10 @@ const buildProvider = (): ModelProvider => {
 const main = async (): Promise<number> => {
   const goal = arg("goal");
   const target = arg("target", "http://localhost:7101/");
-  const binding = Binding.parse(JSON.parse(readFileSync(arg("binding"), "utf8")));
+  // `parseBinding`, not `Binding.parse`: the checked form is what forbids two
+  // symbols sharing one literal, and the compiler's reverse lookup is only
+  // well-defined because of it. It had no production caller until this pass.
+  const binding = parseBinding(JSON.parse(readFileSync(arg("binding"), "utf8")));
   const riskProfile = loadRiskProfile(arg("risk-profile", DEFAULT_RISK_PROFILE_PATH));
   const capabilityId = arg("capability-id", "msc.capability");
   const version = arg("version", "1.0.0");

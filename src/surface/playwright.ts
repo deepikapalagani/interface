@@ -591,32 +591,49 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
         else role = "textbox";
       }
 
-      // WHAT NAMES THIS CONTROL — and the two cases are genuinely different.
+      // WHAT NAMES THIS CONTROL. A control with no text of its own (an input, a
+      // select) is named by the label cell beside it. A LINK or BUTTON is the hard
+      // case, because BOTH rules are correct on one screen and wrong on the other,
+      // and the two rows are nearly identical HTML:
       //
-      // A control with no text of its own (an input, a select) is named by the
-      // label cell beside it: on these screens that is the only thing tying it to
-      // a meaning. A LINK or BUTTON carries its own visible text, which is both
-      // stabler and what the binding already names it by.
+      //   MBR0310, a data grid   `… <td>OPEN</td><td><a>SELECT</a></td>`
+      //   MBR0400, label/value   `<td>CARD SERVICES</td><td><a>OPEN</a></td>`
       //
-      // MEASURED 2026-09-13 on a live discovery run. The results grid renders
-      // `… | OPEN | <a>SELECT</a>`, so the cell-to-the-left rule anchored the
-      // detail link on `OPEN` — the STATUS column's DATA. The compiler rightly
-      // refused the artifact: the binding names that link `SELECT`, and an anchor
-      // of `OPEN` would resolve against one member's card status and miss the
-      // next member, whose row reads `FROZEN`. Row data is not a label, and a
-      // target anchored on it is welded to one record.
+      // BOTH MEASURED LIVE, 2026-09-13, and each rule was shipped and found wrong
+      // in turn. Anchoring on the left cell put the grid's detail link on `OPEN` —
+      // the STATUS column's DATA — welding the target to one member, since the next
+      // row reads `FROZEN`. Anchoring on the control's own text then broke the
+      // detail screen, where the link says only the bare verb `OPEN` and the
+      // compiler refused the artifact because the binding has no such literal. That
+      // second break was invisible to all 321 tests: nothing mints against MBR0400,
+      // and the committed discovery evidence stops at the results grid.
+      //
+      // The discriminator is the ROW WIDTH, and it is not a heuristic about these
+      // two screens — it tracks WHICH CELL CARRIES THE TENANT-BOUND LABEL, the only
+      // thing a binding can name. A two-cell row is the legacy label/value pair and
+      // the tenant's label is on the left (`labels.CARD_SERVICES_LINK`). A wider
+      // row is a data grid, whose header cell is the fixed literal `ACTION` while
+      // the tenant's label rides on the control itself (`labels.OPEN_MEMBER`).
+      //
+      // Known and deliberately not handled: the `OPEN <id>` links rendered BELOW
+      // the grid sit outside any row, so they self-name into a record-specific
+      // anchor. `mock/screens.ts` notes they are unreachable by a structural
+      // anchor, and the binding refuses them at compile.
       //
       // Written as plain consts, not a helper: this function's source is
       // serialised into the page, where a named nested function is rewritten to
       // reference esbuild's `__name` and throws exactly as the banner did.
       const own = (el.textContent ?? "").trim();
-      const namesItself = (tag === "a" || tag === "button") && own !== "" && own.length <= 40;
+      const leftCell = mine > 0 ? (cells[mine - 1]?.textContent ?? "").trim() : "";
+      // An empty label cell names nothing, so it does not win the pair.
+      const labelled = cells.length === 2 && mine === 1 && leftCell !== "";
+      const namesItself = !labelled && (tag === "a" || tag === "button") && own !== "" && own.length <= 40;
 
       return {
         tag,
         role,
         fieldName: el.getAttribute("name"),
-        anchorText: namesItself ? own : mine > 0 ? (cells[mine - 1]?.textContent ?? "").trim() : null,
+        anchorText: namesItself ? own : leftCell !== "" ? leftCell : null,
       };
     });
   }

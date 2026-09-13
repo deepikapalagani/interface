@@ -200,7 +200,8 @@ export class EvidenceWriter {
    * a claim: that this run escalated. A zero-line file would pass an existence
    * check while making that claim falsely, and would put an extra filename in a
    * non-escalating run — which is exactly what verify-determinism compares across
-   * its three scenarios.
+   * its scenarios (three when this was written; four since `card-freeze` joined
+   * them as the first one whose run changes the app).
    */
   handoff(records: readonly HandoffRecord[]): void {
     if (records.length === 0) {

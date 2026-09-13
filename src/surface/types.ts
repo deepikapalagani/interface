@@ -176,7 +176,15 @@ export interface TargetFacts {
   readonly role: string;
   /** The app's own form-field name, where it has one. */
   readonly fieldName: string | null;
-  /** The nearest preceding label cell in the same row — the structural anchor. */
+  /**
+   * The structural anchor: whichever cell carries the TENANT-BOUND LABEL.
+   *
+   * Not simply "the nearest preceding label cell", which is what this said until
+   * both readings were measured and each was found wrong on one screen. In a
+   * two-cell label/value row it IS the preceding cell; in a wider data grid the
+   * preceding cell holds row DATA and the label rides on the control's own text.
+   * `PlaywrightSurface.factsOf` documents the measurement behind the split.
+   */
   readonly anchorText: string | null;
   /** Which frame it lives in, outermost first. */
   readonly framePath: readonly string[];

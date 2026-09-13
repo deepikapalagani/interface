@@ -49,7 +49,7 @@
  */
 import { readFileSync } from "node:fs";
 import { parseCapability, type Capability } from "../capability/schema.js";
-import { Binding } from "../capability/bind.js";
+import { parseBinding } from "../capability/bind.js";
 import type { ReplayResult } from "../contract/result.js";
 import { runEscalation, type Escalate } from "../control/escalation.js";
 import { ControlLease } from "../control/lease.js";
@@ -112,7 +112,11 @@ const stampVerification = (capability: Capability, result: ReplayResult | null):
 
 const main = async (): Promise<number> => {
   const capability = parseCapability(JSON.parse(readFileSync(arg("capability"), "utf8")));
-  const binding = Binding.parse(JSON.parse(readFileSync(arg("binding"), "utf8")));
+  // The CHECKED parse — see `bind.ts`. A binding whose labels collide makes
+  // literal→symbol translation ambiguous, and a wrong guess in a recorded
+  // artifact surfaces on another tenant months later, which is exactly the
+  // failure this guard was written for and had no caller to prevent.
+  const binding = parseBinding(JSON.parse(readFileSync(arg("binding"), "utf8")));
   const target = arg("target", "http://localhost:7101/");
   const evidenceRoot = arg("evidence", "evidence/runs");
   const runId = arg("run-id", `replay-${capability.contract.id}`);

@@ -17,12 +17,28 @@
  *
  * The compiler reads the TRACE and never the transcript, so re-running it here is
  * the same computation the discovery CLI performed, on the same input, with no
- * model involved — this file imports no provider, and `verify-no-llm` would catch
- * it if it did.
+ * model involved. This file imports no provider — read the import block below,
+ * because that is the whole of the guarantee.
+ *
+ * An earlier version of this comment added "and `verify-no-llm` would catch it if
+ * it did". That was false. The checker walks from `src/replay/index.ts` and
+ * `src/replay/main.ts` only, and nothing under `scripts/` is ever reached. It
+ * could not simply be added as a third entry point either: its `FORBIDDEN_PATHS`
+ * are `src/model/`, `src/discover/` and `src/compile/`, and recompiling
+ * legitimately imports two of them. The sentence was exactly the failure this
+ * file's own header describes — a confident claim with nothing behind it —
+ * written while fixing that failure elsewhere.
+ *
+ * EXIT CODES:
+ *   0  the artifact was written
+ *   1  it compiled, then FAILED schema validation — nothing is written
+ *   2  called wrong: a missing flag, or an input file that cannot be read
+ *   3  the compiler REFUSED — a literal the binding cannot name, a screen the
+ *      risk profile does not rate, or a checkpoint symbol it would fabricate
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { Binding } from "../src/capability/bind.js";
+import { parseBinding, type Binding } from "../src/capability/bind.js";
 import { safeParseCapability } from "../src/capability/schema.js";
 import { compileMechanical } from "../src/compile/mechanical.js";
 import { DEFAULT_RISK_PROFILE_PATH, loadRiskProfile } from "../src/compile/risk-profile.js";
@@ -79,11 +95,39 @@ const main = (): void => {
     console.error(`recompile: no readable manifest beside the trace — provenance will be incomplete`);
   }
 
-  const binding = Binding.parse(JSON.parse(readFileSync(arg("binding"), "utf8")));
-  const riskProfile = loadRiskProfile(arg("risk-profile", DEFAULT_RISK_PROFILE_PATH));
+  /**
+   * BOTH READS ARE GUARDED, because an unreadable input is "called wrong".
+   *
+   * These two used to sit bare, so a missing or malformed `--binding` surfaced as
+   * exit 1 with a raw `node:fs` ENOENT stack trace at the operator — and exit 1
+   * on this script means something quite different and much more interesting
+   * ("it compiled, then failed validation"). Two unrelated conditions sharing an
+   * exit code is how a script stops being scriptable.
+   */
+  let binding: Binding;
+  let riskProfile: ReturnType<typeof loadRiskProfile>;
+  try {
+    // Checked, like both CLIs — a recompile runs the same `canonicalise` the
+    // discovery CLI did, so it needs the same guarantee about label collisions.
+    binding = parseBinding(JSON.parse(readFileSync(arg("binding"), "utf8")));
+    riskProfile = loadRiskProfile(arg("risk-profile", DEFAULT_RISK_PROFILE_PATH));
+  } catch (e) {
+    console.error(`recompile: cannot load an input — ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(2);
+  }
+
   const capabilityId = arg("capability-id", manifest.capability?.id ?? "msc.capability");
   const version = arg("version", manifest.capability?.version ?? "1.0.0");
-  const out = arg("out", path.join(runDir, "capability.json"));
+  /**
+   * `--out` IS REQUIRED, and that is a safety default rather than pedantry.
+   *
+   * It used to default to `path.join(runDir, "capability.json")` — i.e. straight
+   * back over the artifact of the run it was given. Point it at a directory under
+   * `/evidence/` and it silently overwrites a graded deliverable. `scripts/demo.ts`
+   * goes to visible lengths never to write there; defaulting into it was this
+   * script doing the exact opposite without saying so.
+   */
+  const out = arg("out");
 
   console.log(`recompile: ${trace.length} trace entr(ies) from ${tracePath}`);
 

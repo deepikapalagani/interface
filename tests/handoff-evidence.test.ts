@@ -313,7 +313,7 @@ describe("EvidenceWriter given no handoff to write", () => {
     // The file's existence is itself a claim that this run escalated. A zero-line
     // file would pass an existence check while making that claim falsely — and
     // would add a filename to a non-escalating run, which is precisely what
-    // verify-determinism compares across its three scenarios.
+    // verify-determinism compares across its scenarios — four, since card-freeze.
     expect(fs.existsSync(path.join(root, "no-escalation", "handoff.jsonl"))).toBe(false);
     expect(complaints.join("\n")).toContain("left absent rather than written empty");
   });

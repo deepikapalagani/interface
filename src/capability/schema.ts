@@ -206,15 +206,56 @@ const Recovery = z.object({
 
 /* ---------------------------------------------------------------- contract */
 
-const Input = z.object({
-  name: z.string().regex(/^[a-z][a-z0-9_]*$/),
-  type: z.enum(["string", "integer", "enum"]),
-  enumValues: z.array(z.string()).optional(),
-  pattern: z.string().optional(),
-  required: z.boolean().default(true),
-  sensitivity: DataClass,
-  description: z.string().min(1),
-});
+/**
+ * `enumValues` AND `type: "enum"` IMPLY EACH OTHER, and this is a safety rule
+ * rather than tidiness.
+ *
+ * `README.md`, `REPORT.md` and `tests/fixtures.test.ts` all rest the
+ * `report_lost` risk boundary on the same sentence: "the enum is the guard —
+ * LOST_STOLEN is not a value this artifact can carry". Measured before this
+ * refinement existed, that guard was a property of the FIXTURE and not of the
+ * schema:
+ *
+ *   {type: "enum", enumValues absent}    accepted "LOST_STOLEN"  -> no issues
+ *   {type: "enum", enumValues present}   accepted "LOST_STOLEN"  -> rejected
+ *   {type: "enum", enumValue:  [...] }   parsed clean; Zod objects are
+ *                                        non-strict, so the misspelled key was
+ *                                        silently stripped and the guard with it
+ *
+ * — i.e. one dropped or mistyped key disabled a stated safety property in
+ * silence. The reverse direction is barred too: `enumValues` on a `string` input
+ * is not enforced by `validateInputs`, yet the rejection message it builds
+ * advertises "one of A|B" regardless of type, so an unenforced constraint was
+ * being described to the caller as if it applied. A constraint that cannot be
+ * declared without being enforced cannot drift from its own error message.
+ */
+const Input = z
+  .object({
+    name: z.string().regex(/^[a-z][a-z0-9_]*$/),
+    type: z.enum(["string", "integer", "enum"]),
+    enumValues: z.array(z.string()).optional(),
+    pattern: z.string().optional(),
+    required: z.boolean().default(true),
+    sensitivity: DataClass,
+    description: z.string().min(1),
+  })
+  .superRefine((input, ctx) => {
+    const declared = input.enumValues !== undefined && input.enumValues.length > 0;
+    if (input.type === "enum" && !declared) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["enumValues"],
+        message: `input "${input.name}" is an enum but declares no enumValues, so it would accept any string — the permitted values are the guard`,
+      });
+    }
+    if (input.type !== "enum" && declared) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["enumValues"],
+        message: `input "${input.name}" declares enumValues but is typed "${input.type}", and only an enum input enforces them`,
+      });
+    }
+  });
 
 const Output = z.object({
   name: z.string().regex(/^[a-z][a-z0-9_]*$/),
@@ -441,7 +482,18 @@ export const CapabilityChecked = Capability.superRefine((cap, ctx) => {
    */
   for (const subtree of [["plan", cap.plan] as const, ["contract", cap.contract] as const]) {
     eachString(subtree[1], [subtree[0]], (text, at) => {
-      if (text.startsWith("{{")) return;
+      /**
+       * THERE IS DELIBERATELY NO `{{`-PREFIX EXEMPTION HERE.
+       *
+       * This line used to read `if (text.startsWith("{{")) return;`, which
+       * skipped the ENTIRE string rather than the parameter in it. Measured:
+       * `"{{member_id}} 4111111111111111"` parsed clean, while the same literal
+       * one character later — `"x {{member_id}} 4111111111111111"` — was
+       * correctly rejected. It also could not protect what it was written to
+       * protect: no `{{param}}` spelling can match a bare digit run in the first
+       * place, so the exemption never prevented a false positive and its only
+       * measurable effect was a one-character bypass of the rule.
+       */
       for (const p of PII_SHAPED) {
         if (p.re.test(text)) fail(at, `${p.what} must be a {{param}}, not a recorded literal`);
       }

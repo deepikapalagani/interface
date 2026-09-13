@@ -28,6 +28,14 @@ JSON arguments, correct target. Per turn: prompt 284 / completion 177–214 toke
 compile step uses `response_format: {type:'json_object'}` plus Zod validation and retry. Roughly
 2 in 8 calls return a 429; **retry-with-backoff is mandatory in the adapter**, not optional.
 
+> **Correction, 2026-09-13.** The first sentence describes a design that was never built. `response_format`
+> and `json_object` appear nowhere in the repo, and there is no model-driven compile step to apply them to:
+> `src/compile/mechanical.ts` imports no provider and derives the artifact from `trace.jsonl` alone. That
+> turned out to be the better design — compilation is deterministic and re-runnable (`npm run recompile`)
+> precisely because no model is in it — but this entry predates the decision and was never revisited. The
+> second sentence is accurate and still load-bearing: the 429 rate is real and the adapter's
+> retry-with-backoff is pinned by `tests/openai-compat.test.ts`.
+
 The design consequence worth stating: discovery can run on infrastructure an institution controls,
 and replay uses no model at all, so nothing in a recorded capability depends on who authored it.
 → *Architecture*, *Safety*
@@ -154,7 +162,15 @@ confirmation, with `action: FREEZE | UNFREEZE | LOST_STOLEN`. Risk is a property
 uses FREEZE precisely because it is reversible and the fixture can be re-run while tuning.
 Second, read-only capability: `msc.member.read_balances@1.0.0`, reusing screens 1–5.
 
-> **Correction, 2026-09-13.** `msc.member.read_balances@1.0.0` was never built and appears nowhere in the
+> **Correction, 2026-09-13.** Two claims above are false of what shipped, not one.
+>
+> The graded discovery run does **not** use FREEZE. Both committed discovery runs are
+> `msc.member.lookup`, goal "Look up member 400200101" — `set_status` and its `FREEZE` parameter are
+> exercised by replay, by the determinism corpus and by the fault harness, but never by a discovery run.
+> The reasoning in the sentence is sound and still describes why `card-freeze` is the mutating scenario in
+> the determinism corpus; it simply attached itself to the wrong run.
+>
+> And `msc.member.read_balances@1.0.0` was never built and appears nowhere in the
 > repo — not as a fixture, not in evidence, not in a test. The read-only capability that exists is
 > `msc.member.lookup@1.0.0` (`tests/fixtures/lookup@1.0.0.json`, and the compiled `capability.json` in
 > every committed replay run). The frozen name is left in place because this log is chronological, but it
@@ -406,7 +422,8 @@ clears that floor by exactly zero margin, which is recorded rather than tuned aw
 replay run exists", which would make it vacuous.
 
 > **Superseded later the same day.** Replay evidence for all three result classes is now committed and
-> this checker exits 0 across 5 runs and 19 files. The gap it named was real, and refusing to weaken the
+> this checker exits 0 across 5 runs and 19 files — 6 runs and 23 files as of 2026-09-13, once
+> `escalation-timeout` was committed. The gap it named was real, and refusing to weaken the
 > rule is what kept it visible until it was closed.
 
 Its measured limits are recorded rather than implied, because an overstated checker is the failure mode
@@ -545,7 +562,7 @@ keeping a false positive. Recorded with the numbers rather than left as an asser
 
 **Replay evidence is now committed**, all three result classes — success, business outcome, and a
 bad-input failure that finally leaves a readable log. `verify-evidence` went from exit 1 to **exit 0**
-across 5 runs and 19 files.
+across 5 runs and 19 files (6 and 23 as of 2026-09-13).
 
 Still open, recorded rather than quietly carried: `events.jsonl` is not redacted and `LogEvent.redacted`
 still has no producer (`replay/predicate.ts` renders a read value into `observed`, so a capability that
@@ -596,7 +613,8 @@ automation is locked out. The scripted operator drives the REAL driver — only 
 simulated, because a stand-in returning a canned outcome would prove nothing about control transfer.
 
 **Determinism is preserved by keeping the escalation path unreachable from the corpus**, not by special
-casing: the shipped policy carries `screenRules: []`, so the three scenarios `verify-determinism` runs
+casing: the shipped policy carries `screenRules: []`, so the three scenarios `verify-determinism` ran at
+the time — four since `card-freeze` was added — 
 cannot reach the raise site, and the demo escalates through a policy FILE instead. All five gates stayed
 green: 163 tests across 21 files.
 
@@ -978,8 +996,13 @@ not a stale comment, but a confident summary of code that nobody re-read.
 **One run closed the last evidence gap in both §3.5 and §3.6.** `evidence/runs/escalation-timeout` replays
 `report_lost@1.0.0`, whose committing step is `irreversible`; the shipped policy rates irreversible
 `confirm`, so the gate refuses it to a person, and with nobody at the console the turn expires. It is the
-only committed run that is a *failure* carrying `handoff.jsonl`, `disposition: "timeout"`,
-`controlAtExit: "automation"`, and the `operator` and `policy` why-arms. It is also where §3.5's "richer
+only committed run that is a *failure* carrying `handoff.jsonl`, `disposition: "timeout"`, a closing
+`controlOwner: "automation"`, and the `operator` and `policy` why-arms.
+
+> **Corrected within hours of being written.** The sentence above first said `controlAtExit: "automation"`.
+> That field is real, but it lives on the `ResultEnvelope` printed to stdout and appears in **zero** files
+> under `/evidence/` — I took it from README's description of the run rather than from the run. Two
+> reviewers found it independently. The equivalent fact that *is* on disk is the closing `controlOwner`. It is also where §3.5's "richer
 signal on failure" lives, as a **text** snapshot rather than an image: the handoff record carries the
 redacted `observedText` of the screen the run stopped on. That is a choice, not a shortfall —
 `verify-evidence` holds a run directory to a closed set of filenames, and `screenshot.png` is excluded from
@@ -1003,3 +1026,117 @@ checks; and the chained `npm run verify` exit 0. The secrets check was re-run ag
 One thing this pass has not yet done, and the reason it is not claimed above: the six-area adversarial
 review of the settled tree was still running when this entry was written. Its findings are not in this log.
 → *Artifact schema*, *Heterogeneity & multi-tenant*, *Evidence*, *Escalation & handoff*, *Safety*, *Cuts*
+
+## Six adversarial reviews, and the fix that broke the flagship flow (2026-09-13)
+
+Six reviewers were run over the settled tree, one per area — schema and contract, replay, discovery and
+compile, safety and control, surface and mock, docs and evidence — each told to read every line in its
+area, to verify before reporting, and to say what it checked that was FINE. They were read-only and knew
+nothing of each other. Where two of them measured the same defect independently, that is recorded below,
+because independent agreement is the only cheap substitute for a second pair of eyes.
+
+**The headline finding was a defect nobody had written down, and two reviewers found it separately with
+near-identical probes.** `plan.recovery`'s two non-acting verbs did not merely fail to work — they made
+runs WORSE. `settle()` returns the instant any raced expectation holds, and `expectationsFor` raced every
+recovery rule, including the ones the engine answers by doing nothing. So `wait_and_retry`, declared
+against a transient load, ENDED the wait the moment the load appeared. Measured, same plan, same surface,
+load clearing after 1200ms: **~1229ms and completed with no rule declared; ~1ms and `postcondition_failed`
+with `wait_and_retry` x3 declared.** Declaring §3.3-f's own named example of a recoverable condition was
+strictly worse than declaring nothing. Fixed by racing only the verbs that act — a dialog BLOCKS the page,
+so noticing it promptly is the point, while a wait needs more time, not less — and `classify` already
+evaluates every rule independently, so nothing was lost by leaving them out of the race. Pinned now by
+`tests/recovery-wait.test.ts`, which proves both directions and the bounded-failure case.
+
+**A fix I made earlier the same night broke the flagship mutating flow, and only a live review caught
+it.** The `factsOf` anchor rule had been changed so a link names itself, fixing the results grid where
+`… | OPEN | <a>SELECT</a>` had anchored the detail link on the STATUS column's DATA. On the member-detail
+screen the row is `<td>CARD SERVICES</td><td><a>OPEN</a></td>` — the link's own text is a bare verb and
+the tenant's label is the cell to its left. So the new rule minted `table_anchor("OPEN")`, the compiler
+refused it, and a real discovery run of the card capability would have died at compile AFTER the model
+call was paid for.
+
+Three things about that are worth keeping:
+
+1. **Both readings of the rule were shipped, and each was wrong on one screen.** The rows are nearly
+   identical HTML. The discriminator that resolves them is ROW WIDTH, and it is not a heuristic about two
+   screens: it tracks which cell carries the TENANT-BOUND LABEL, the only thing a binding can name. A
+   two-cell row is the legacy label/value pair (`labels.CARD_SERVICES_LINK` on the left); a wider row is a
+   data grid whose header is the fixed literal `ACTION` while the tenant's label rides on the control
+   (`labels.OPEN_MEMBER`).
+2. **All 321 tests stayed green through the break.** Nothing mints against the detail screen and the
+   committed discovery evidence stops at the results grid, so the suite could not see it. That is a
+   coverage hole, not bad luck, and `tests/anchor-naming.test.ts` now pins the rule on BOTH screens at once
+   so neither reading can be restored without the other failing.
+3. **The fix was verified by measurement and the previous one was too.** Being measured is not the same as
+   being right; a measurement only covers the case it was taken on.
+
+**What else the reviews confirmed and what was done.** Four findings were verified against the code before
+being acted on, because this repo has twice been damaged by "correcting" a true statement into a false one:
+
+- `controlAtExit` is named by README, REPORT and this log as carried by the escalation run, and appears in
+  **zero** files under `/evidence/` — it is a stdout-only envelope field. All three now name the closing
+  `controlOwner`, which is genuinely on disk. I had propagated that error into this log hours earlier by
+  reading the README instead of the run.
+- REPORT contradicted itself nineteen lines apart: one paragraph said the committed handoff run closes the
+  §3.6 gap, and the roadmap below still listed "a committed handoff run" as future work. I nearly dismissed
+  this as a paraphrase because my `grep` missed the sentence — it wraps across a line break. The reviewer
+  was right and my tooling was wrong.
+- The `--self-test` claim in README was too strong. The self-tests prove the checks they PLANT; around ten
+  live checks in `verify-evidence` have no plant, including the transcript cross-examination of
+  `model.calls` — it runs only on a discovery run while the planted run is a replay, so deleting it
+  outright leaves the self-test green. README now says exactly that.
+- `.env.example` shipped a `MODEL_PROVIDER` variable nothing reads, advertising `anthropic` as a value.
+  There is no anthropic adapter and Anthropic's API is not OpenAI-compatible, so setting it would have
+  changed nothing except a reader's belief while the key still went to `MODEL_BASE_URL`. Removed.
+
+Also fixed: the PII refinement skipped any string beginning with `{{`, so `"{{member_id}} 4111111111111111"`
+parsed clean while the same literal one character later was rejected — an exemption that could never
+prevent a false positive and did nothing but open a one-character bypass. An `enum` input could omit
+`enumValues` and accept anything, which is what `report_lost`'s "the enum is the guard" safety claim rested
+on; enum and `enumValues` now imply each other in both directions. `parseBinding` — the checked parse that
+forbids two symbols sharing a literal — had zero production callers and now backs all three. The
+`endHumanTurn` return leg sat outside the guarded region, so an operator pressing HAND BACK on a torn-down
+context stranded the lease on `human` with no matching return; it now restores and journals like the
+arming leg, which the surrounding comment had claimed all along.
+
+**Deliberately not fixed tonight, and this list is the point of writing any of this down.** Each is real,
+each is measured by a reviewer, and each was judged too large or too risky for an unsupervised pass:
+
+- **The discovery loop's dead-end detector counts reads and fills**, which do not change the screen digest,
+  so four extractions from one screen abort the run as "the application is not responding" — a false
+  statement, and §3.2 requires typed extracted data. The shipped card flow survives by one step.
+- **A model turn carrying two tool calls orphans the second**, producing a wire-invalid next request that
+  an OpenAI-compatible endpoint rejects with a 400, which the adapter does not retry. `loop.ts` documents
+  the exact invariant it breaks.
+- **The cassette pairs assistant turns to tool results positionally**, so a recorded turn with no tool call
+  skews every later comparison and raises a FALSE divergence, accusing the app of drift it does not have.
+  The committed transcripts happen to be clean, so `demo:offline` is unaffected today.
+- **`recompile` refuses on both committed traces** — they predate the literals-not-symbols fix. The command
+  works on a fresh trace; README now says so rather than leaving a reviewer to discover it.
+- **A targetless `read` step is silently skipped and counted complete**, and an `assert` step emits no
+  event at all, so a "successful" run can produce an empty `events.jsonl` that this repo's own evidence
+  gate rejects.
+- **The masked screenshot cannot mask the thing that matters.** `nameMayContainPii` is `false` in all 40
+  occurrences and `true` in none; and were it true it would not help, because the flag describes a SCREEN
+  while the capture consumes it as a list of ELEMENTS, and the PAN renders in a grid cell no target
+  resolves to. REPORT now states both limits instead of calling it repaired.
+- **`humanAction()` bypasses the policy gate entirely**, and read paths are ungated, so the "one action's
+  worth of exposure" bound does not hold for a trailing read.
+- **`describe()` and `launch()` are unbounded against a queued dialog** — measured at 30s timeouts, 3/3
+  deterministic. This is the mechanism behind `--run broadcast` being intermittent.
+- **`session_expired`, `outcome_unknown` and `SideEffectRisk: "committed"` have no producers**, in the file
+  that documents deleting `ControlOwner: "released"` for that exact reason. Marked rather than removed:
+  deleting a union member changes exhaustiveness checking across the executor and the evidence gate, and
+  that is a considered change, not a 4am one.
+- **REPORT is ~3,600 words against a brief asking 1–3 pages.** A decision was already taken to leave it at
+  ~2,000; it has since grown by two thirds, so the earlier decision no longer covers it. Flagged rather
+  than reversed unilaterally.
+**Measured at the close of the pass, over the tree as committed.** `npm run verify` exit 0 end to end:
+`tsc --noEmit` clean; **327 tests across 28 files** (321 and 26 before this pass — `recovery-wait` and
+`anchor-naming` are the two new files, and both exist because a defect reached production through a gap
+they now close); `verify-no-llm` catching all three planted import forms; `verify-evidence` catching all
+31 planted defect classes and reporting 6 runs / 23 files with no seeded PII literal and no leak shape;
+`verify-determinism` rejecting both planted divergences and correctly ignoring the volatile-only one; and
+`demo:offline` passing its 9 checks. The two schema refinements added here rejected nothing that already
+exists, which is the house rule for telling a tightened rule from a broken one.
+→ *Determinism & error handling*, *Heterogeneity & multi-tenant*, *Safety*, *Escalation & handoff*, *Evidence*, *Cuts*

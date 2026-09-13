@@ -161,14 +161,21 @@ a banner that fails to render must still leave a locked session; raise the reque
 capability, current step, current state and why it stopped; then reclaim if a person answered, or expire
 if nobody did.
 
-**What the masked screenshot actually does.** The capture blacks out the targets a capability flags as
-`nameMayContainPii`, and refuses to produce an image at all if a flagged target fails to resolve. That
-flag was hardcoded `false` on every minted target, so the filter was always empty while the operator
-console captioned the result "masked at capture" regardless — a dead control reading as a working one.
-Discovery now sets the flag from a PII-shape test over the screen a target was minted on, and the caption
-reports the real number of blacked-out regions or says plainly **UNMASKED — this capability declared no
-PII-bearing target**. The mitigation that was always real: those bytes are served from memory to the
-operator and are never written under `/evidence/`.
+**What the masked screenshot does — and does not.** The capture blacks out the targets a capability flags
+as `nameMayContainPii`, and refuses to produce an image at all if a flagged target fails to resolve. An
+earlier draft of this paragraph called that repaired. It is not, in two measured ways.
+
+Nothing produces a `true`. `mint()` does set the flag from a PII-shape test over the screen a target was
+minted on, but every capability that reaches the PII-bearing screen is hand-authored, and the flag reads
+`false` in all 40 occurrences across fixtures and evidence — the committed escalation run records
+`masked:0`. And setting it would not help: the flag is a statement about a SCREEN, the capture consumes it
+as a list of ELEMENTS, and on CARD SERVICES the card number renders in a grid cell that no capability
+target resolves to. The mask would black out three empty form inputs and leave both PANs visible.
+
+What is real: those bytes are served from memory to the operator and are never written under `/evidence/`,
+and the caption does not overclaim — it reports the true number of blacked-out regions, or says plainly
+**UNMASKED — this capability declared no PII-bearing target**. Keying the mask on the PII-bearing region
+rather than on the declared targets is the fix, and it is not built.
 
 **Same session, proven.** The property fails silently — a handoff that quietly opened a second browser
 would render identical screens and pass naive assertions. The strongest of three mechanical checks:
@@ -255,8 +262,11 @@ what the run mechanically established instead. The field has no consumer — nam
 up as a feature.
 
 **Hand-authorable but not discoverable:** static-text reads. A `read` step against a label/value row is
-expressible in the schema and replays correctly — the card capability's confirmation number is one — but
-discovery has no tool that mints such a target, so an artifact needing one is written by hand.
+expressible in the schema and replays correctly — the card capability's confirmation number is one — so an
+artifact needing one is written by hand. The reason is narrower than "no tool mints it", which is what this
+said until it was checked: discovery *can* mint from `describe(ref)`, and `read()` has a static-text
+fallback. What blocks it is upstream, in what the model is shown — only ACTIONABLE roles are given refs, so
+a static-text node never reaches the model as something it could name.
 
 **Stubbed at a clean seam:** the operator console UI, and the model during offline runs, where a cassette
 replays a recorded transcript through the real loop and refuses if the screens no longer match.
@@ -274,12 +284,26 @@ replays a recorded transcript through the real loop and refuses if the screens n
   pass exactly as declared, including `undeclared_dialog`, which until this pass no code path could
   produce.
 - **An SSN rendered without separators, and PIN/CVV by field name**; `plan.reconcile`, declarable but with
-  no consumer; app-side session-aware refusal; three of the five interstitial renders; and the replay CLI
-  writing no evidence if `replay()` itself throws.
+  no consumer; app-side session-aware refusal; and three of the five interstitial renders.
+- **Evidence survives anything that happens inside a run, but not a failure before one starts.** `replay()`
+  is called inside the guarded region, so a throw there still writes events, manifest and artifact —
+  this bullet previously claimed the opposite, which was the wrong half. Launching the browser and starting
+  the operator console sit *outside* it, so a failure there leaves a run directory with no manifest, which
+  this project's own `verify:evidence` rejects.
+- **Discovery's dead-end detector counts steps that cannot move the screen.** A `read` issues no action at
+  all and a `fill` does not change the text digest, so consecutive extractions from one screen trip the
+  no-progress stop and report "the model is acting, the application is not responding" — false on both
+  halves. §3.2 asks for typed extracted data, and the shipped card flow clears this by a single step.
+- **A model turn carrying two tool calls answers only the first.** The second is dropped, leaving the next
+  request wire-invalid; an OpenAI-compatible endpoint rejects it with a 400, which the adapter does not
+  retry. The loop's own header states the invariant this path breaks.
+- **A `read` step naming no target is skipped in silence and counted complete, and an `assert` step emits
+  no event**, so a run can report success having written an events log the evidence gate would reject.
 
 Two gaps listed here previously are now closed, by one run. `escalation-timeout` under `/evidence/` is a
 failed `report_lost` replay that ceded to a person nobody answered: it carries `handoff.jsonl`,
-`disposition: "timeout"`, and the `operator` and `policy` why-arms, so §3.6 is exercised by a committed
+`disposition: "timeout"`, a closing `controlOwner: "automation"`, and the `operator` and `policy`
+why-arms that no other committed run has, so §3.6 is exercised by a committed
 file rather than only by a test. The same record carries the redacted `observedText` of the screen the
 run stopped on, which is §3.5's richer signal — as a **text snapshot rather than an image**, because
 `verify:evidence` holds a run directory to a closed filename set that deliberately excludes
@@ -296,6 +320,5 @@ screenshot, a DOM snapshot or a trace; this is the second.
    a recording reusable rather than a one-off.
 3. **A second tenant binding, committed with a run against it** — the mechanism exists and the mock has a
    second tenant; what is missing is the proof.
-4. **A committed handoff run**, so §3.6 rests on a file in `/evidence/` and not only on a test.
-5. **Closing the last two holes in the redactor** — an SSN rendered without separators, and PIN/CVV, which
+4. **Closing the last two holes in the redactor** — an SSN rendered without separators, and PIN/CVV, which
    are absent from the credential field list. The event log itself is already redacted on the way out.

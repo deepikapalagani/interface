@@ -325,7 +325,40 @@ export const runEscalation = async (
     throw e;
   }
 
-  if (session) await session.endHumanTurn();
+  /**
+   * THE RETURN LEG NEEDS THE SAME GUARD AS THE ARMING LEG — the same failure,
+   * arriving by the other door.
+   *
+   * `endHumanTurn()` awaits the same `ensurePlumbing()` whose
+   * `exposeBinding`/`addInitScript` calls were MEASURED rejecting on a closed or
+   * torn-down context. Unguarded here, a throw skipped the `expire`/`reclaim`
+   * below and the `handoff.returned` line after it, leaving the lease on "human"
+   * with no matching return: precisely the one-sided audit of control that moving
+   * the ARMING call inside the `try` was written to remove. The catch above
+   * states the property as surviving "either" failure — until this guard existed
+   * it survived one, and the operator pressing HAND BACK on a dead context was
+   * the uncovered half.
+   *
+   * The ordering deliberately matches that catch: the DRIVER may stay locked,
+   * which is the safe direction since it keeps refusing automation, but the LEASE
+   * is restored and journalled before the error propagates.
+   */
+  if (session) {
+    try {
+      await session.endHumanTurn();
+    } catch (e) {
+      lease.expire();
+      transitionLine(
+        "handoff.returned",
+        outcome.kind === "timeout" ? NOBODY : outcome.operator,
+        "handback_error",
+        "the driver to release the session back to automation",
+        e instanceof Error ? e.message : String(e),
+        { pausedMs: now() - pausedFrom, epoch: lease.epoch },
+      );
+      throw e;
+    }
+  }
 
   // `reclaim` and `expire` are different events, not two spellings of one: an
   // expiry means nobody resolved anything, and the run must fail with its own

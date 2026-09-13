@@ -203,7 +203,36 @@ const expectationsFor = (capability: Capability, expect: Step["post"] | null): E
   const list: Expectation[] = [];
   if (expect) list.push({ id: "expected", predicate: expect });
   for (const o of capability.contract.outcomes) list.push({ id: `outcome:${o.code}`, predicate: o.when });
-  for (const r of capability.plan.recovery) list.push({ id: `recovery:${r.id}`, predicate: { all: [r.when], any: [] } });
+  /**
+   * ONLY THE RECOVERY VERBS THAT ACT BELONG IN THE RACE.
+   *
+   * `settle` returns the instant any raced expectation holds. Racing a rule the
+   * engine answers by DOING NOTHING therefore inverts that rule's meaning:
+   * `wait_and_retry`, declared against a transient load, ENDED the wait the
+   * moment the load appeared — `applyRecovery` issued nothing, the loop
+   * re-observed, and `maxAttempts` burned in microseconds before a hard failure.
+   *
+   * MEASURED, same plan, same surface, load clearing after 1200ms, step budget
+   * 5000ms: with NO recovery rule declared the step completes in ~1229ms; with
+   * `wait_and_retry` x3 declared it FAILS in ~1ms, `postcondition_failed`, three
+   * recovery attempts recorded. Declaring the spec's own named example of a
+   * recoverable condition (§3.3-f, "wait/retry a transient load") made the run
+   * strictly worse than declaring nothing at all.
+   *
+   * A dialog verb still belongs here, and the asymmetry is the whole point: a
+   * dialog BLOCKS the page, so the postcondition cannot come true underneath it
+   * and noticing it promptly is what lets the engine dismiss it instead of
+   * waiting out the entire budget first. The non-acting verbs are the opposite
+   * case — they need MORE time, not less. Leaving them out of the race costs
+   * them nothing, because `classify` evaluates every rule in `plan.recovery`
+   * independently against the observation (classify.ts, step 1) rather than
+   * reading whatever `settle` matched.
+   */
+  for (const r of capability.plan.recovery) {
+    if (r.do === "dismiss_dialog" || r.do === "accept_dialog") {
+      list.push({ id: `recovery:${r.id}`, predicate: { all: [r.when], any: [] } });
+    }
+  }
   return list;
 };
 

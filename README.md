@@ -8,6 +8,19 @@ The target is a mock legacy banking app that ships in this repo: framesets, tabl
 empty accessible names, the same field name in two frames, and per-tenant column differences. Nothing
 here touches a real system.
 
+## Fastest path
+
+Two commands, no API key and no live model, running the whole slice end to end:
+
+```bash
+npm install && npx playwright install chromium
+npm run demo:offline
+```
+
+That drives a real browser against the mock app in this repo: a recorded discovery transcript replayed
+through the real agent loop, the artifact compiled from it, that artifact replayed with no model in the
+decision loop, and all three result classes checked. Everything below is detail.
+
 ## Setup
 
 Node 20.17 or newer.
@@ -72,29 +85,52 @@ npm run mock          # http://localhost:7101/
 **1. Run the agent on a goal**
 
 ```bash
+EV=$(mktemp -d)          # keep the path — step 2 reads the artifact back out of it
+
 npm run discover -- \
   --goal "Look up member 400200101" \
   --target http://localhost:7101/ \
   --binding tests/fixtures/fcu@4.2.json \
   --capability-id msc.member.lookup \
   --run-id my-discovery \
-  --evidence "$(mktemp -d)"
+  --evidence "$EV"
 ```
 
-Writes `<evidence>/my-discovery/`: the compiled `capability.json`, the `trace.jsonl` it was compiled
+Writes `$EV/my-discovery/`: the compiled `capability.json`, the `trace.jsonl` it was compiled
 from, the raw `transcript.jsonl`, a structured `events.jsonl`, and `manifest.json`.
 
 Without a key, add `--provider cassette --from evidence/runs/discovery-lookup-v3/transcript.jsonl`.
+
+**If the compile is refused**
+
+The compiler stops rather than guess — a literal the binding cannot name, a screen the risk profile does
+not rate, or a checkpoint symbol it would have to fabricate. Each refusal names what to add. Add it, then
+re-compile from the trace the run already wrote, with no second model call:
+
+```bash
+npm run recompile -- \
+  --run "$EV/my-discovery" \
+  --binding tests/fixtures/fcu@4.2.json \
+  --goal "Look up member 400200101" \
+  --out "$EV/my-discovery/capability.json"
+```
+
+Exit 0 wrote the artifact; 1 it compiled but failed schema validation; 2 called wrong; 3 refused again.
+A discovery run costs a model call and several minutes, a binding gap costs one line — without this, a
+refused compile threw away the run instead of the line.
+
+One wart, stated rather than hidden: the two *committed* discovery traces predate the fix that records
+target literals instead of symbols, so re-compiling those two refuses. A freshly recorded trace compiles.
 
 **2. Replay the artifact it just produced**
 
 ```bash
 npm run replay -- \
-  --capability <evidence>/my-discovery/capability.json \
+  --capability "$EV/my-discovery/capability.json" \
   --binding tests/fixtures/fcu@4.2.json \
   --target http://localhost:7101/ \
   --run-id my-replay \
-  --evidence "$(mktemp -d)"
+  --evidence "$EV"
 ```
 
 Prints a typed result and exits 0 for success or an expected business outcome, 1 for a hard failure.
@@ -208,15 +244,21 @@ npm run verify
 | command | what it proves |
 | --- | --- |
 | `npm run typecheck` | strict TypeScript, clean |
-| `npm run test` | 321 tests across 26 files |
+| `npm run test` | 327 tests across 28 files |
 | `npm run verify:no-llm` | walks the import graph from both replay entry points and fails if it can reach a model SDK, `src/model/`, `src/discover/` or `src/compile/`. Reads static imports, `import()` with a literal specifier, and refuses any `import()` whose specifier is not a literal |
 | `npm run verify:evidence` | every run under `/evidence/` is complete, internally consistent, and free of the seeded PII literals and the leak shapes |
 | `npm run verify:determinism` | replays 4 scenarios twice as `reset → run`, byte-comparing evidence after projecting away timestamps and run ids |
 | `npm run demo:offline` | the whole slice, with no model |
 
 Each of the three checkers runs its own `--self-test` as part of these commands — they plant defects and
-assert each is caught by the check that owns it, so a check that silently stopped working fails rather
-than passes.
+assert each **planted** defect is caught by the check that owns it, so a check that silently stopped
+working fails rather than passes.
+
+The limit is that word. Around ten live checks in `verify:evidence` have no plant behind them, the most
+consequential being the transcript cross-examination of `model.calls` — the check that turns `calls: 0`
+from an unfalsifiable field into a checkable one. It runs only on a discovery run, and the planted run is
+a replay, so deleting it outright still leaves the self-test green. The self-tests prove the checks they
+plant; they do not prove the checker entire.
 
 One limit worth stating: `verify:evidence` hunts for the seeded PAN/SSN literals (read from
 `mock/seed.ts` at runtime) and for the live `MODEL_API_KEY` (read from `.env`). `.env` is gitignored, so
@@ -232,8 +274,8 @@ also keep the trace the artifact was compiled from and the raw transcript.
 
 `escalation-timeout` is the §3.6 run. `report_lost@1.0.0` declares an irreversible step, the shipped
 policy rates irreversible `confirm`, so the gate refuses it to a person — and with nobody at the console
-the turn expires. It is a *failed* run that carries `handoff.jsonl`, `disposition: "timeout"`,
-`controlAtExit: "automation"`, and the `operator` and `policy` why-arms that no other committed run has.
+the turn expires. It is a *failed* run that carries `handoff.jsonl`, `disposition: "timeout"`, a closing
+`controlOwner: "automation"`, and the `operator` and `policy` why-arms that no other committed run has.
 
 It is also where §3.5's "at least one richer signal on failure" lives. The signal is a **text snapshot,
 not an image**: the handoff record carries the redacted `observedText` of the screen the run stopped on.

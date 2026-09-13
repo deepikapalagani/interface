@@ -419,14 +419,23 @@ describe("when an undeclared dialog blocks the submit", () => {
    * declares it, and `accept_dialog` is deliberately not in the shipped
    * `allowedActions`, so the submit cannot complete.
    *
-   * WHAT IS ASSERTED IS THE PROPERTY, NOT TODAY'S MECHANISM. Measured: the run
-   * currently THROWS — `locator.click: Timeout 30000ms exceeded` — because the
-   * queued dialog blocks the click and `PlaywrightSurface` bounds nothing, so the
-   * error escapes `replay()` untyped rather than arriving as the
-   * `undeclared_dialog` failure kind the contract declares for exactly this case.
-   * If the driver is ever taught to notice a pending dialog, this will instead
-   * RETURN a typed failure. Both are acceptable here; the one outcome that must
-   * never happen is a SUCCESS, because a click that reports success over a
+   * WHAT IS ASSERTED IS THE PROPERTY, NOT TODAY'S MECHANISM — and the mechanism
+   * has since changed, which is why the tolerance was worth having.
+   *
+   * It used to THROW: `locator.click: Timeout 30000ms exceeded`, because the
+   * queued dialog blocked the click and the driver bounded nothing, so the error
+   * escaped `replay()` untyped instead of arriving as the `undeclared_dialog`
+   * kind the contract declares for exactly this case. This comment described that
+   * as current long after it stopped being true.
+   *
+   * `observe`, `locate`, `read` and `act` now check for a pending dialog first, so
+   * the run RETURNS the typed failure — `npm run mock:fault -- --run confirm_submit`
+   * asserts precisely that, and re-measured here those calls answer in 0ms rather
+   * than timing out. (`launch`'s initial navigation and `describe` are still
+   * unbounded; see README's "Not built".)
+   *
+   * The assertion below stays tolerant of both deliberately. The one outcome that
+   * must never happen is a SUCCESS, because a click reporting success over a
    * cancelled submit is the phantom success this whole design is built against.
    */
   it("commits NOTHING, and the app's empty audit trail is the independent proof", async () => {
