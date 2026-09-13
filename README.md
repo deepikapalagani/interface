@@ -8,6 +8,16 @@ The target is a mock legacy banking app that ships in this repo: framesets, tabl
 empty accessible names, the same field name in two frames, and per-tenant column differences. Nothing
 here touches a real system.
 
+## Demo
+
+https://github.com/user-attachments/assets/2cd1493d-b23f-476b-b83e-b6747fecfb67
+
+100 seconds, no narration. An LLM drives the legacy console once and that run becomes a typed capability
+artifact; the artifact then replays with **no model in the decision loop**, freezes a card, and returns the
+confirmation number the application's own audit trail independently records. It closes on the same
+capability answering three inputs three different ways — a match, a "no such member" that exits **0**
+because it is an answer rather than a crash, and a bad input that fails.
+
 ## Fastest path
 
 Two commands, no API key and no live model, running the whole slice end to end:

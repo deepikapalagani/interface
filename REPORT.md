@@ -8,6 +8,10 @@ Everything below is checkable with `npm run verify`: typecheck, tests, the no-LL
 scan, the determinism comparison, and the whole slice with no API key. `DECISIONS.md` holds the longer
 reasoning and the measurements, including the decisions that turned out wrong.
 
+A [100-second recording](https://github.com/user-attachments/assets/2cd1493d-b23f-476b-b83e-b6747fecfb67)
+of the end-to-end flow is linked from `README.md`: discovery, the compiled artifact, a replay with no model
+in the decision loop, and the application's own audit trail confirming the result it returned.
+
 ## Architecture
 
 Three boundaries, each built so the guarantee holds even if someone forgets it.
