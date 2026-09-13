@@ -51,6 +51,16 @@ the recorded screens no longer match what the app renders.
 
 `npm run demo` is the same with a live model-driven discovery run.
 
+## A note on `--evidence`
+
+Every command below passes `--evidence "$(mktemp -d)"`. That is not decoration.
+
+`--evidence` defaults to `evidence/runs`, which is the graded deliverable, and the default run id is a
+constant; `EvidenceWriter.event` **appends**. So running a documented command twice with the default
+would silently double `events.jsonl` in a committed run directory and turn `npm run verify` red in a way
+that looks like a defect in the system rather than in the instructions. Point runs at a temp directory,
+and pass `--evidence evidence/runs` only when you mean to add a run to the deliverable.
+
 ## Demo path
 
 Start the app in one terminal:
@@ -68,10 +78,10 @@ npm run discover -- \
   --binding tests/fixtures/fcu@4.2.json \
   --capability-id msc.member.lookup \
   --run-id my-discovery \
-  --evidence evidence/runs
+  --evidence "$(mktemp -d)"
 ```
 
-Writes `evidence/runs/my-discovery/`: the compiled `capability.json`, the `trace.jsonl` it was compiled
+Writes `<evidence>/my-discovery/`: the compiled `capability.json`, the `trace.jsonl` it was compiled
 from, the raw `transcript.jsonl`, a structured `events.jsonl`, and `manifest.json`.
 
 Without a key, add `--provider cassette --from evidence/runs/discovery-lookup-v3/transcript.jsonl`.
@@ -80,11 +90,11 @@ Without a key, add `--provider cassette --from evidence/runs/discovery-lookup-v3
 
 ```bash
 npm run replay -- \
-  --capability evidence/runs/my-discovery/capability.json \
+  --capability <evidence>/my-discovery/capability.json \
   --binding tests/fixtures/fcu@4.2.json \
   --target http://localhost:7101/ \
   --run-id my-replay \
-  --evidence evidence/runs
+  --evidence "$(mktemp -d)"
 ```
 
 Prints a typed result and exits 0 for success or an expected business outcome, 1 for a hard failure.
@@ -99,7 +109,8 @@ declares a typed input, so it shows all three result classes:
 ```bash
 npm run replay -- --capability tests/fixtures/lookup@1.0.0.json \
   --binding tests/fixtures/fcu@4.2.json --target http://localhost:7101/ \
-  --input member_id=400200101      # success                         exit 0
+  --evidence "$(mktemp -d)" \
+  --input member_id=400200101      # success                            exit 0
   # --input member_id=400299999    # business_outcome MEMBER_NOT_FOUND  exit 0 — not a failure
   # --input member_id=abc          # failed, input_schema_violation      exit 1 — still writes a log
 ```
@@ -112,11 +123,12 @@ transaction, returning the confirmation number the app issues:
 ```bash
 npm run replay -- --capability tests/fixtures/set_status@1.0.0.json \
   --binding tests/fixtures/fcu@4.2.json --target http://localhost:7101/ \
+  --evidence "$(mktemp -d)" \
   --input member_id=400200101 --input card_last4=4021 --input action=FREEZE
 ```
 
-Its steps are `reversible`, which the shipped policy allows, so it runs unattended. Check it against the
-app's own audit trail at <http://localhost:7101/screen/audit>, then `npm run mock:reset`.
+Its committing step is `reversible`, which the shipped policy allows, so it runs unattended. Check it
+against the app's own audit trail at <http://localhost:7101/screen/audit>, then `npm run mock:reset`.
 
 `report_lost@1.0.0` is the same flow with an `irreversible` step. The shipped policy rates irreversible
 actions `confirm`, so it escalates to a person instead of running. The artifact cannot route around
@@ -128,19 +140,31 @@ the app demands.
 Faults are armed explicitly, fire once on a stated condition, then disarm. Nothing is probabilistic.
 
 ```bash
-npm run mock:fault -- --list     # each fault, when it fires, what it proves
-npm run mock:fault -- --arm abend_after_commit
+npm run mock:fault -- --list                    # each fault: when it fires, and what replay should return
+npm run mock:fault -- --arm abend_after_commit  # arm it and print the command to run by hand
+npm run mock:fault -- --run abend_after_commit  # arm it, replay it, and CHECK the outcome
 npm run mock:fault -- --status
 npm run mock:fault -- --clear
 ```
 
-- `broadcast` — a dialog a declared recovery rule dismisses (a **recoverable condition**)
-- `confirm_submit` — an **undeclared** dialog blocks the submit, so nothing commits
-- `abend_after_commit` — the change lands, then the app fails before showing the confirmation:
-  `reconcile_required` with `sideEffectRisk: unknown`
+What each fault does to the app, and what a replay against it is expected to return, is stated in
+**one** place — `scripts/fault.ts` — and `--run` compares a real replay against it, in the result *and*
+in the app's own audit trail. It exits non-zero on any mismatch and names the mechanism the expectation
+rested on. This file used to restate those outcomes itself, and all three copies said the same wrong
+thing; restating them here is what let them drift.
 
-`POST /__admin/reset` clears any armed fault, and the admin routes are denied to automation by every
-shipped policy, so a capability can never arm its own faults.
+`--run confirm_submit` and `--run abend_after_commit` pass. **`--run broadcast` currently fails, and that
+is deliberate**: its declared expectation is the designed behaviour, and the run does not reliably reach
+it — a queued native dialog can still block the driver. Measured three times: one success, two runs that
+never returned. The alternative was to declare the hang as the expectation, which would print PASS while
+the recoverable class does not work. See `REPORT.md` → Cuts → Known gaps.
+
+`POST /__admin/reset` clears any armed fault. A capability cannot arm its own faults, but be precise
+about why: the enforcement is that the surface has no verb that can issue a POST to an arbitrary URL at
+all (`navigate`, `click`, `fill`, `press` and the two dialog verbs are the whole set), and the mock
+renders no control that reaches `/__admin`. The shipped policy does carry `deniedRoutes: ["/__admin"]`,
+but that rule is evaluated against the page an action *starts* from rather than where it lands, so it is
+a declared intent rather than the thing doing the work. See `REPORT.md` → Safety.
 
 ## Human handoff
 
@@ -155,15 +179,25 @@ npm run replay -- --headed --operator \
   --policy tests/fixtures/policy-escalate.json \
   --capability tests/fixtures/lookup@1.0.0.json \
   --binding tests/fixtures/fcu@4.2.json \
-  --target http://localhost:7101/ --input member_id=400200101
+  --target http://localhost:7101/ --evidence "$(mktemp -d)" \
+  --input member_id=400200101
 ```
 
-The policy rates the screen riskier than the artifact claims, so the run raises an intervention, cedes
-control and paints a banner into the live page. Do the step in the browser that is already open, then
-press **HAND BACK**.
+The policy rates the screen riskier than the artifact claims, so the run raises an intervention and cedes
+control. Do the step in the browser that is already open, then hand control back **from the console on
+:7900**.
 
-The operator UI is deliberately mocked — one HTML page, no framework. The control transfer underneath is
-real, and `tests/handoff.integration.test.ts` proves the same-session property headlessly.
+The in-page banner renders, and so does its **HAND BACK** button — either door ends the turn, because
+both resolve the same promise the run is blocked on. Measured on 2026-09-13 against a live mock through
+the public `Surface` API: before the handoff neither the banner text nor the button is present; during
+it, `AUTOMATION IS PAUSED` is on screen and two `HAND BACK` buttons appear in the accessibility tree (one
+per paintable frame of the frameset); after hand-back both are gone.
+
+This paragraph previously said the opposite. The banner genuinely did not render — tsx's transpiler
+rewrote the painting function to call a helper absent from the page, and a bare catch swallowed the
+`ReferenceError` — and the fix and this file were written in the same pass, so the documentation briefly
+described the defect rather than the repair. The control transfer underneath was real throughout, and
+`tests/handoff.integration.test.ts` proves the same-session property headlessly.
 
 ## Verify
 
@@ -174,20 +208,39 @@ npm run verify
 | command | what it proves |
 | --- | --- |
 | `npm run typecheck` | strict TypeScript, clean |
-| `npm run test` | 240 tests across 24 files |
-| `npm run verify:no-llm` | walks the import graph from both replay entry points and fails if it can reach a model SDK, `src/model/`, `src/discover/` or `src/compile/` |
-| `npm run verify:evidence` | every run under `/evidence/` is complete, consistent, and free of secrets or PII |
+| `npm run test` | 321 tests across 26 files |
+| `npm run verify:no-llm` | walks the import graph from both replay entry points and fails if it can reach a model SDK, `src/model/`, `src/discover/` or `src/compile/`. Reads static imports, `import()` with a literal specifier, and refuses any `import()` whose specifier is not a literal |
+| `npm run verify:evidence` | every run under `/evidence/` is complete, internally consistent, and free of the seeded PII literals and the leak shapes |
 | `npm run verify:determinism` | replays 4 scenarios twice as `reset → run`, byte-comparing evidence after projecting away timestamps and run ids |
 | `npm run demo:offline` | the whole slice, with no model |
 
-Each checker has a `--self-test` that plants defects and asserts they are caught, so a check that
-silently stopped working would fail rather than pass.
+Each of the three checkers runs its own `--self-test` as part of these commands — they plant defects and
+assert each is caught by the check that owns it, so a check that silently stopped working fails rather
+than passes.
+
+One limit worth stating: `verify:evidence` hunts for the seeded PAN/SSN literals (read from
+`mock/seed.ts` at runtime) and for the live `MODEL_API_KEY` (read from `.env`). `.env` is gitignored, so
+in a fresh clone that last detector is **inactive** — the script says so in its own output rather than
+reporting a clean scan. A key committed into evidence would then be caught only by the generic api-key
+*shape*, never by value.
 
 ## What is in `/evidence/`
 
-Five runs: two model-driven discoveries, and three replays covering success, an expected business
-outcome, and a hard failure. Each has a manifest and a structured event log; discovery runs also keep
-the trace the artifact was compiled from and the raw transcript.
+Six runs: two model-driven discoveries; three replays covering success, an expected business outcome
+and a hard failure; and one escalation. Each has a manifest and a structured event log; discovery runs
+also keep the trace the artifact was compiled from and the raw transcript.
+
+`escalation-timeout` is the §3.6 run. `report_lost@1.0.0` declares an irreversible step, the shipped
+policy rates irreversible `confirm`, so the gate refuses it to a person — and with nobody at the console
+the turn expires. It is a *failed* run that carries `handoff.jsonl`, `disposition: "timeout"`,
+`controlAtExit: "automation"`, and the `operator` and `policy` why-arms that no other committed run has.
+
+It is also where §3.5's "at least one richer signal on failure" lives. The signal is a **text snapshot,
+not an image**: the handoff record carries the redacted `observedText` of the screen the run stopped on.
+That is a deliberate choice rather than a shortfall — `verify:evidence` holds a run directory to a closed
+set of filenames, and `screenshot.png` is excluded from it on purpose so the checker's own self-test can
+plant that name and prove the "unrecognised file" rule fires. The brief allows a screenshot, a DOM
+snapshot or a trace; this is the second.
 
 ## Not built
 
@@ -195,10 +248,16 @@ the trace the artifact was compiled from and the raw transcript.
   notion of a session or holder. The two real enforcement points are the control lease and the driver.
 - **`plan.reconcile`** is in the schema but has no consumer; `reconcile_required` is advice to the
   caller, and the audit screen is where a human establishes the truth.
-- **`events.jsonl` redaction** — the model's context and the discovery evidence files are redacted; the
-  event log is not.
+- **Redaction of an SSN rendered without separators**, and of PIN/CVV by field name. `events.jsonl` *is*
+  redacted — measured: `EvidenceWriter.event` runs every line through `redactDeep` before appending and
+  stamps `redacted: true` only when masking changed the bytes. What is left open is narrower: the SSN rule
+  matches only the hyphenated shape, because a bare nine-digit rule would mask every member id on this
+  surface, and a credential-named key is masked only when its value is a string.
 - **Parameterising a discovered artifact** is manual.
 - **Three of the five interstitial renders** — denial, session-terminated, and the validation modal.
+- **A queued native dialog is not bounded at every driver entry point.** `observe`, `locate`, `read` and
+  `act` check for one first; `launch`'s initial navigation and `describe` do not. That is the mechanism
+  behind the `broadcast` fault being intermittent rather than reliable — see `npm run mock:fault -- --list`.
 
 `REPORT.md` covers the design. `DECISIONS.md` records each decision as it was made, with the
 measurements behind it, including the ones that turned out wrong.

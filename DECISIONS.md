@@ -70,12 +70,43 @@ human turn: a cookie set before the turn survived it, one page throughout, the h
 screens, the banner survived navigation inside a frameset, and automation acted again only after
 reclaiming. No container, no VNC, no screencast.
 
+> **Correction, 2026-09-13 — the banner clause is false of the shipped driver.** That probe was hand-driven;
+> the code path that shipped does not do it. `PlaywrightSurface.notice()` paints via
+> `frame.evaluate(paintBanner)` and registers the same function through `addInitScript`, and both fail
+> inside the page with `ReferenceError: __name is not defined`: the project runs exclusively through tsx,
+> and esbuild's keep-names transform rewrites the nested `const render = async () => …` inside
+> `paintBanner` as a call to a module-scope `__name` helper that does not exist in the browser. A bare
+> `.catch(() => {})` swallowed it, and its comment blamed mid-paint navigation. Reproduced by a reviewer
+> who replaced only that catch with a logger: the ReferenceError printed from all three frames, in both
+> the evaluate and the init-script path. What is false is the VISIBLE half only — the control transfer
+> itself completes through the operator console on :7900, and the same-session property is still proven
+> headlessly in `tests/handoff.integration.test.ts`.
+>
+> **Second correction, later the same day — it is fixed, and this banner's own closing sentence was the
+> last thing asserting otherwise.** The painting function no longer relies on a nested arrow, so nothing
+> is rewritten to `__name`, and the swallowing catch now logs. Measured directly through the public
+> `Surface` API against a live mock, with no agent in the loop: before the handoff neither the banner
+> text nor its button is present; during it `AUTOMATION IS PAUSED` is on screen and TWO
+> `button:"HAND BACK"` nodes appear in the accessibility tree, one per paintable frame of the frameset;
+> after hand-back both are gone. Worth recording how close this came to shipping backwards: the fix and
+> the documentation were written by different components of the same pass, running in parallel, and the
+> docs component described the defect its sibling was in the middle of repairing. For a few hours three
+> reviewer-facing files asserted a fault the code no longer had — the mirror image of this repo's usual
+> sin, and no better.
+
 One correction from the measurement: the banner's target frame must be chosen **from Node** by
 frame name or URL. At `addInitScript` time a frameset's column sizing is not yet applied, so a
 width guard inside the page misfires.
 
-Still owed: lease **enforcement** — that automation is *prevented* from acting mid-handoff — is a
-separate mechanism, automatable headlessly, due in M4.
+Still owed at the time of writing: lease **enforcement** — that automation is *prevented* from acting
+mid-handoff — as a separate mechanism, automatable headlessly.
+
+> **Delivered.** `assertAutomation` runs at the single surface chokepoint before the policy check, so an
+> action by the wrong actor fails rather than being labelled; the epoch fence refuses any action built
+> before the transfer; and the driver refuses on its own flag, sharing no state with the lease, so a bug
+> in one cannot produce two actors writing at once. `tests/gate.test.ts` and
+> `tests/handoff.integration.test.ts` pin both halves, and `evidence/runs/escalation-timeout` is a
+> committed run that ceded, timed out and handed control back.
 → *Escalation & handoff*
 
 ## Dangerous artifacts are unrepresentable
@@ -85,6 +116,19 @@ PII-shaped literal in place of a `{{param}}`, no acting step without a postcondi
 recovery alongside an irreversible step, no output without exactly one producing step, no persisted
 snapshot ref as a durable target, no contract understating its own risk, no step targeting an
 undeclared symbol.
+
+> **Correction, 2026-09-13 — there are now TWELVE, and four of the original eight asserted more than
+> they enforced.** An adversarial audit broke seven of the eight lines of defence with a 35-case probe:
+> 34 of 35 malicious documents parsed clean. The PII rule described itself as covering "anywhere in the
+> plan" while inspecting exactly one field; the postcondition rule was a strict subset of a check Zod
+> already ran, so it could never be the sole cause of a rejection; the retry rule tested the same
+> condition twice, forbidding the harmless combination and admitting the dangerous ones; and the symbol
+> rule looked only at `steps[].target`, so a typo inside a checkpoint atom went undeclared — and in an
+> `absent` atom evaluated TRUE, making a capability's success condition structurally incapable of
+> failing. All four are rewritten and the count is now twelve (`schema.ts`, numbered blocks 1-12).
+> One exemption is deliberate and named rather than hidden: `rowCount.grid` is excluded from the symbol
+> rule, because the evaluator ignores `grid` and counts page-wide, and requiring it would reject four
+> frozen committed files over a field that changes no behaviour.
 
 The tests assert *which* refinement fired, not merely that parsing failed — a table that only
 checked `success === false` would pass against a schema that rejected everything.
@@ -109,6 +153,12 @@ confirmation, with `action: FREEZE | UNFREEZE | LOST_STOLEN`. Risk is a property
 *value*: freeze and unfreeze are reversible, lost/stolen is irreversible. The graded discovery run
 uses FREEZE precisely because it is reversible and the fixture can be re-run while tuning.
 Second, read-only capability: `msc.member.read_balances@1.0.0`, reusing screens 1–5.
+
+> **Correction, 2026-09-13.** `msc.member.read_balances@1.0.0` was never built and appears nowhere in the
+> repo — not as a fixture, not in evidence, not in a test. The read-only capability that exists is
+> `msc.member.lookup@1.0.0` (`tests/fixtures/lookup@1.0.0.json`, and the compiled `capability.json` in
+> every committed replay run). The frozen name is left in place because this log is chronological, but it
+> names nothing a reviewer can run.
 
 Freezing this list first is what stops components building demos on screens that do not exist.
 → *Architecture*
@@ -315,6 +365,14 @@ Three defects surfaced while establishing this, all predating the change:
 - The committed `lookup@1.0.0` checkpoint asserts `rowCount eq 1`, so on this surface a not-found
   replays as `checkpoint_failed` — a hard failure where the caller needed a business outcome. The
   mirrored §3.3 mistake, live in a fixture.
+
+  > **Corrected 2026-09-13: it does not, and the committed evidence is what settles it.** `classify()`
+  > tests `contract.outcomes[]` *before* the checkpoint is ever evaluated, and `lookup@1.0.0` declares
+  > MEMBER_NOT_FOUND, so the not-found run never reaches the checkpoint at all —
+  > `evidence/runs/replay-lookup-not-found/manifest.json` records `"result": "business_outcome"`, exit 0.
+  > The `rowCount eq 1` clause is still wrong on its own terms, and would misfire the moment that outcome
+  > were removed; what makes it unreachable is the precedence rule this log argues for two sections
+  > earlier. The defect was real — it was the reasoning about its consequence that was wrong.
 - Refinement 8 validates only `step.target`. Symbols named *inside* predicate atoms are never checked
   against `plan.targets` — that same fixture's checkpoint names a `RESULTS_GRID` which is **not**
   among its declared targets, and it parses cleanly today only because the evaluator never resolves
@@ -334,6 +392,14 @@ classification, the process exit code and the app's own before/after state all r
 message. It refuses to skip when the mock is unreachable — skipping is how a check becomes vacuous —
 and it fails as VACUOUS rather than printing OK if fewer than four event lines were compared. Today it
 clears that floor by exactly zero margin, which is recorded rather than tuned away.
+
+> **Both numbers corrected 2026-09-13, by running it.** There are **three** planted divergences, not
+> eleven: a changed event name and a changed result status, which must be REJECTED, and changed
+> timestamps and run ids, which must be IGNORED — the third is the one that proves the projection is not
+> simply dropping everything inconvenient. And the corpus does not clear the event-line floor by zero
+> margin: the measured run compares **25** event lines (found 4, not-found 5, bad-input 1, card-freeze
+> 15) against `MIN_EVENT_LINES = 4`. The "zero margin" claim predates both the card-freeze scenario and
+> the evidence fixes that gave failing runs a log at all. Four scenarios, each run twice, exit 0.
 
 **`verify-evidence` exits 1 today, correctly**, on a real gap: no replay evidence is committed, so §6's
 "logs from a replay run" is unsupported by any file. The rule was deliberately not weakened to "if a
@@ -363,6 +429,16 @@ provably contradicted by the run's own files.
 → *Determinism & error handling*, *Evidence*, *Safety*
 
 ## The mock is smaller than the plan frozen against it
+
+> **Superseded the same day. Banner added 2026-09-13** — this section had none, while both of its
+> neighbours did, so a linear reader met its present tense as current fact. Every claim below was true
+> when written and is false of the shipped mock: CRD0500 and CNF9000 both exist (`mock/screens.ts`
+> `cardServices`, `confirmation`), `/screen/cards` is routed, `POST /screen/card-action` is a real
+> mutating route (`mock/main.ts`), `applyCardAction` appends to `state.audit` on every attempt against a
+> real membership (`mock/actions.ts`), `/screen/audit` renders all nine fields of every row, and
+> `msc.card.set_status@1.0.0` — called "unbuildable" below — is built, committed, replayed in CI and
+> exercised by all three faults. Read what follows as "before that build", and see "The app can change
+> something, and three exits were only correct because it could not" further down.
 
 Measured against the frozen list above: `mock/screens.ts` exports nine renderers, and **six of the eight
 screens exist**. CRD0500 card services and CNF9000 confirmation were never written, and **all five**
@@ -477,6 +553,24 @@ read an SSN field would log it — unreachable on today's corpus); `redactDeep` 
 key only when the value is a string, and PIN/CVV are absent from the field list; and the replay CLI
 writes no evidence at all if `replay()` itself throws, which needs a vocabulary decision first — an
 unexpected exception is not a citation of anything.
+
+> **Re-measured 2026-09-13, and the boundary has moved by exactly one file.** `handoff.jsonl` IS now
+> redacted on the way out (`EvidenceWriter.handoff` maps `redactDeep` over every record), and the
+> discovery writer redacts the trace and the transcript. `events.jsonl` is **still not redacted**:
+> `EvidenceWriter.event` writes `JSON.stringify(e)` straight through. So the gap named above is still
+> open, is still the one boundary where a value read off a screen could reach disk unmasked, and is
+> reported as such in README and REPORT rather than being quietly dropped from the list.
+
+> **That re-measurement was wrong, and this is the correction — 2026-09-13, adversarial verification.**
+> `EvidenceWriter.event` does NOT write `JSON.stringify(e)` straight through: it computes
+> `JSON.stringify(redactDeep(e))`, writes that, and stamps `redacted: true` only when masking changed the
+> line (`src/evidence/log.ts`). Measured by calling the real writer with `"CARD NO 4111111111114021 SSN
+> 900-55-0101"` in an event's `observed` field: the appended line reads `************4021` and
+> `***-**-0101` with `redacted: true`. `src/safety/redact.ts`'s own call-site list already named
+> `events.jsonl`, so the source and this log disagreed and the log was the stale half. README and REPORT
+> asserted the gap in four places and have been corrected to the narrower one that is genuinely open: the
+> SSN rule matches only the hyphenated shape, and a credential-named key is masked only when its value is
+> a string. `LogEvent.redacted` also has a producer now — the line above.
 → *Safety*, *Evidence*, *Determinism & error handling*
 
 ## §3.6 built: raise, cede, the same live session, hand back, resume
@@ -713,3 +807,199 @@ run-scoped flag; it is strictly one-directional, so it can only upgrade `retry_s
 `reconcile_required`, never the reverse. The lesson worth keeping: a flag introduced to fix three named
 sites needs a census of every site that could have used it, or the fix is only as wide as the brief.
 → *Determinism & error handling*, *Safety*, *Escalation & handoff*, *Cuts*
+
+## The verification pass: what the checkers were not checking (2026-09-13)
+
+An adversarial review found this repo's besetting sin to be **comments asserting guarantees the code does
+not implement**. The checkers turned out to be the worst instance, because a checker that overstates is
+the one defect that hides all the others.
+
+**`verify-no-llm` was blind to dynamic imports, and its self-test could not reveal it.** The single regex
+`/(?:from|import)\s*["']([^"']+)["']/` requires a quote immediately after `import`, so the parenthesis in
+`await import("@anthropic-ai/sdk")` defeated it, and a specifier held in a variable was invisible.
+Measured: a reviewer planted both forms in the replay path and the gate printed "self-test passed" and
+"OK — 21 modules reachable … none of them a model", exit 0. The self-test planted a STATIC import — the
+one form the walker already understood — so it was structurally incapable of exposing the hole. This is
+the sole structural enforcement of the claim README and REPORT both sell. It now reads three forms and
+REFUSES a non-literal specifier rather than skipping it, and the self-test plants all three. Proven by
+sabotage: deleting the dynamic-import read makes the self-test fail naming only that plant, exit 1.
+
+**`verify-evidence`'s per-check proof was cross-satisfied.** Its expected-offence needles were plain
+substrings, so `"missing required field"` was answered equally by the manifest loop, the event loop, the
+why-arm loop and the handoff loop — a reviewer deleted the ENTIRE manifest required-fields loop and still
+got "23 planted defect classes, all caught", exit 0. (DECISIONS already recorded this as "overstated by
+2x"; the script header and README were the stale half and are now reconciled.) Every offence now carries
+a prefix naming the record it came from and every needle includes that prefix. Re-run the same sabotage:
+exit 1, naming exactly one check. A second sabotage on a different check names exactly that one.
+31 planted classes now, and three checks that were never planted at all — event required fields, event
+time order, and the closed-record rule — are planted too.
+
+**Three further holes in the same script, each a silent-failure shape.** The manifest was the one record
+exempt from the unknown-key rule the script argues for elsewhere, while every committed manifest already
+carried an undeclared `capability` key: it is now a closed record declaring `capability` and
+`artifactContentHash` (the latter declared before it has a writer, because declaring a name that never
+appears costs nothing and leaving it undeclared would make its arrival an offence). The live-key detector
+returns nothing when `.env` is absent — i.e. in every clone — while the summary still read "no secrets or
+PII found"; the script now says INACTIVE in its own output. And the PII ground-truth floor counted PANs
+and SSNs in one total, so a reseed touching only the SSN rendering would keep the floor satisfied while
+that class of ground truth vanished; the floor is per class now, which is what the header always claimed.
+
+**`npm run verify` did not run any of the self-tests.** Six scripts were chained and `--self-test` was
+passed to none, while README placed the self-test sentence directly under the verify table. The three
+`verify:*` scripts now carry it, which costs nothing measurable — the determinism self-test plants its
+divergences into the corpus that run already produced.
+
+**The fault catalogue was the most reviewer-visible falsehood in the repo, and triplication was the
+defect.** `scripts/fault.ts`, `README.md` and `mock/seed.ts` each carried their own copy of what
+`broadcast` does and all three promised "success — the declared dismiss_dialog rule clears the alert and
+the run continues", while the engine returned `postcondition_failed` with `recoveries: []` — something
+`tests/card.integration.test.ts` had already recorded in a comment as unreachable. Fixed by removing the
+copies rather than updating them: `mock/seed.ts` now describes only what the APP does (a mock fixture has
+no business asserting engine behaviour), README points at `--list`, and `scripts/fault.ts` is the single
+source — made SELF-CHECKING, so `--run <name>` arms the fault, replays, and compares the result AND the
+app's own audit trail against what it declares, exiting non-zero on any mismatch and naming the mechanism
+the expectation rested on.
+
+Measured with that, against a mock on a high port, evidence into `mktemp -d`:
+
+- `abend_after_commit` — **PASS**: `failed / postcondition_failed`, `reconcile_required`, `unknown`, and
+  one APPLIED row in the app's trail. The dangerous direction, behaving as designed.
+- `confirm_submit` — **PASS**, against an expectation rewritten twice in one day as the engine moved
+  under it. It returns `failed / undeclared_dialog`, `reconcile_required`, `unknown`, audit EMPTY. Earlier
+  the same morning it did not: `replay()` threw `locator.click: Timeout 30000ms exceeded.` and the CLI
+  exited 1 having written no run directory, so `undeclared_dialog` was a FailureKind nothing could
+  produce. `reconcile_required` beside an empty trail is deliberate — the engine issued a click at a step
+  that can commit and cannot see that the dialog cancelled it, so it refuses to promise nothing happened.
+- `broadcast` — **MISMATCH, deliberately left as one, and the headline finding is only HALF closed.**
+  Measured four times across this pass, in order: `failed / postcondition_failed` with `recoveries: []`
+  (the original defect); no return within 420s once the recovery loop had landed but the driver still
+  blocked; one clean **success** with one APPLIED row; then no return within 240s and again within 420s,
+  the last on a freshly started mock with nothing else running. The engine half is genuinely fixed —
+  `applyRecovery` is one helper called at all three observation points, precondition, postcondition and
+  the capability checkpoint. The driver half is not: a queued native dialog can still block a
+  page-touching call. **One pass in four is not a working mechanism**, so the expectation stays declared
+  as `success` and the command stays red.
+
+  The method matters more than the result here. This expectation was written as a deliberate mismatch,
+  turned green on one re-measurement, and was then proven intermittent by re-running it instead of
+  stopping at the answer that was convenient. Three prose copies of this claim had been asserting the
+  PASS for days while the engine returned the opposite; a single self-checking copy caught the real state
+  in an afternoon — including the part that a single green run would have hidden.
+
+**A measured trap worth recording, because the symptom points at the wrong thing.** `fault.ts` first used
+`fetch` for its admin calls and failed with a bare "fetch failed" on the `/__admin/state` call made right
+after the replay subprocess returned — which reads as a stopped server. `spawnSync` blocks this process's
+event loop for the whole replay, so it cannot notice the mock closing an idle keep-alive connection and
+the next call reuses a dead socket. `verify-determinism` hit the identical thing as `read ECONNRESET` and
+solved it with `agent: false`; this now does the same rather than retrying past it.
+
+**Two numbers in this log were wrong and are corrected above:** the determinism self-test plants three
+divergences, not eleven (two must be rejected, one must be IGNORED — that third is what proves the
+projection is not dropping everything inconvenient), and the corpus compares 25 event lines against a
+floor of 4, not "zero margin".
+
+**Decisions taken in this pass, recorded because they are trade-offs rather than fixes:**
+
+1. **`rowCount.grid` is exempt from the schema's symbol rule.** Every other symbol named in a predicate
+   atom must be declared in `plan.targets`; `grid` may not be. The evaluator ignores it and counts rows
+   page-wide, so enforcing it would reject artifacts over a field that changes no behaviour — and would
+   reject four frozen files, the committed `lookup@1.0.0` fixture and three committed evidence
+   `capability.json`s, all of which cite a `RESULTS_GRID` that is declared nowhere. Those are graded
+   evidence. Exempting the field and saying so beats enforcing a rule the corpus cannot satisfy, and the
+   evaluator now says in its own `observed` string that the count was page-wide.
+2. **A verification stamp may claim success without a timestamp.** `replayedAt` is optional beside
+   `replayResult: "success"`, but a capability claiming success MUST record `modelCalls`. The asymmetry
+   is deliberate: the call count is the claim that matters and is checkable against the manifest, whereas
+   a timestamp nobody verifies is another hardcoded provenance field — the failure mode this log already
+   names as worse than an absent one. Nothing yet writes `"success"`, which stays an open gap rather than
+   a field that pretends.
+
+   > **Corrected 2026-09-13, adversarial verification.** The last sentence was already false when it was
+   > written: `src/replay/main.ts` defines `stampVerification()` and calls it at the point it writes the
+   > artifact (`evidence.artifact(stampVerification(capability, result))`), so a successful replay stamps
+   > `replayResult: "success"` and `modelCalls: 0` into the `capability.json` that run emits. The stamp has
+   > a producer; only the committed evidence, which predates it, still reads `not_yet_verified`. The rest
+   > of the decision — `replayedAt` omitted, `modelCalls` required beside a success claim — stands.
+3. **The compiler refuses to compile a step whose risk it cannot establish**, instead of stamping
+   `read_only` on everything. `read_only` is the least conservative label in the enum, and a discovery run
+   that clicked a committing submit used to compile to it — so a failed replay answered `retry_safe` on a
+   card it had already actioned. A compile that stops is recoverable; an artifact that lies about its risk
+   is not.
+→ *Safety*, *Evidence*, *Determinism & error handling*, *Artifact schema*, *Cuts*
+
+## The unsupervised pass: a targeting bug a live run caught, and one promise still half made (2026-09-13)
+
+Run without anyone watching, on a standing instruction to fix, test, review and document. Recorded in
+detail because a pass nobody observed is the one that most needs a written trail.
+
+**A live discovery run caught a targeting bug no test in this repo could have.** `factsOf` decides what
+names a control. It took the text of the cell to the control's left — right for a label/field grid, wrong
+for this one. The results grid renders `… | OPEN | <a>SELECT</a>`, so the rule anchored the member-detail
+link on `OPEN`: not a label, but the STATUS column's **data**. A capability minted from that run would
+have targeted the link by a word that changes when the member's status changes — the worst failure mode
+this system has, because it is silent and it replays green until the day the data differs. Fixed at
+`src/surface/playwright.ts:601-619` by separating a control that names itself (an `a` or `button` with its
+own short text) from one named by its neighbouring cell. Written as plain `const`s rather than a helper,
+deliberately: this function's source is serialised into the page, where esbuild's keep-names transform
+rewrites a named nested function to reference `__name` — which does not exist in that context. That is the
+identical mechanism that broke the handoff banner, and it would have thrown the identical swallowed
+`ReferenceError`.
+
+The lesson is about coverage, not about grids. Every test here drives the same seeded mock, where `OPEN` is
+the status of the member the fixtures look up. The bug needed a *live* run to surface because only a live
+run had a reason to mint a fresh target rather than replay a frozen one.
+
+**A command now exists for a remedy three error messages name — and they still do not name it.**
+`mechanical.ts` refuses a compile three ways, and each refusal tells the operator to "add it and re-compile
+from trace.jsonl". Measured: `compileMechanical` had exactly one caller, no npm script matched `compile`,
+and `discover` took no `--from-trace` flag, so the remedy named in every refusal could not be run.
+`scripts/recompile.ts` closes that — it re-runs the same compilation from a run's own `trace.jsonl`, with
+no model involved, validates through `safeParseCapability` before writing, and reads provenance from the
+run's manifest rather than stamping today's clock. It matters beyond convenience: a discovery run costs a
+model call and several minutes, a binding gap costs one line, and without this a refused compile threw away
+the run instead of the line.
+
+Half closed, and the open half was found by checking my own claim rather than by any test. The three
+refusals at `risk-profile.ts:81`, `mechanical.ts:95` and `mechanical.ts:341` still say "re-compile from
+trace.jsonl" without naming `npm run recompile`, and the string `recompile` appears in no markdown file in
+this repo. An operator who hits a refusal now learns *what* to do and not *how* — a thinner version of the
+defect the script was written to remove. Two further gaps, stated rather than fixed: it is the only script
+with no test, and `tests/compile-mechanical.test.ts:167` pins the `RiskNotEstablished` class but not the
+message, so the wording is unprotected.
+
+**And a correction to my own description of it.** I stated this script's exit contract three times as
+"2 called wrong, 3 compiler refused, 0 wrote the artifact". It has four exits — `1` is *compiled but failed
+schema validation* (`scripts/recompile.ts:115`), which was in none of those descriptions. Nothing shipped
+is false, because no document in the repo states the contract at all; the falsehood was only ever in my own
+account of the work, and it was one edit away from being written into this log as established fact. Worth
+recording precisely because it is the failure this repo keeps having, arriving by its least visible route:
+not a stale comment, but a confident summary of code that nobody re-read.
+
+**One run closed the last evidence gap in both §3.5 and §3.6.** `evidence/runs/escalation-timeout` replays
+`report_lost@1.0.0`, whose committing step is `irreversible`; the shipped policy rates irreversible
+`confirm`, so the gate refuses it to a person, and with nobody at the console the turn expires. It is the
+only committed run that is a *failure* carrying `handoff.jsonl`, `disposition: "timeout"`,
+`controlAtExit: "automation"`, and the `operator` and `policy` why-arms. It is also where §3.5's "richer
+signal on failure" lives, as a **text** snapshot rather than an image: the handoff record carries the
+redacted `observedText` of the screen the run stopped on. That is a choice, not a shortfall —
+`verify-evidence` holds a run directory to a closed set of filenames, and `screenshot.png` is excluded from
+that set on purpose so the checker's own self-test can plant the name and prove the unrecognised-file rule
+fires. The brief allows a screenshot, a DOM snapshot or a trace; this is the second.
+
+**Two entries in this log were corrected in place, in opposite directions.** The handoff-banner correction
+had itself gone stale: it closed with "re-measured at the close of this pass: still unfixed", which was
+false by the time anyone read it — the banner renders, measured through the public `Surface` API against a
+live mock. And the control-lease entry still listed enforcement as "due in M4" months after
+`assertAutomation`, the epoch fence and the driver's independent flag all shipped. Both now carry dated
+second corrections rather than rewritten history.
+
+**Final state over the settled tree**, measured in one battery: `tsc --noEmit` clean; **321 tests across 26
+files**, all passing; `verify-no-llm`, `verify-evidence` and `verify-determinism` all green *including*
+their own `--self-test` passes, which plant defects and assert each is caught; `demo:offline` OK on 8
+checks; and the chained `npm run verify` exit 0. The secrets check was re-run against the public repo: the
+49-character key in `.env` appears in **zero** tracked files, **zero** untracked-but-committable files, and
+**zero** commits in the history.
+
+One thing this pass has not yet done, and the reason it is not claimed above: the six-area adversarial
+review of the settled tree was still running when this entry was written. Its findings are not in this log.
+→ *Artifact schema*, *Heterogeneity & multi-tenant*, *Evidence*, *Escalation & handoff*, *Safety*, *Cuts*
