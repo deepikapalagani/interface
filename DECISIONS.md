@@ -586,6 +586,43 @@ demonstration uses the committed `lookup@1.0.0` fixture, which declares a typed 
 swapping artifacts there would have overclaimed exactly the capability that is missing.
 → *Architecture*, *Determinism & error handling*, *Cuts*
 
+## How the mutating flow was verified, after the review that never ran
+
+Worth recording because it changes what the green ticks above are worth. The build was orchestrated as
+parallel agents, and the adversarial pass over the card capability and the gates **was interrupted before
+it produced anything** — its transcript ends `[Request interrupted by user]` and it never resumed. The
+component that touched a GATE (`scripts/verify-determinism.ts`) and added two capability fixtures is
+therefore the one component whose independent review is missing from that process.
+
+So it was verified by hand instead, and the checks are recorded here rather than assumed:
+
+- **The gate's own diff was read before trusting its green.** It changed from hardcoding
+  `http://localhost:7101/` to spawning its own mock from the working tree on an ephemeral port. That is
+  strictly tighter, and it fixes a real hole: after any change to `mock/`, the old version reported green
+  against whatever stale process happened to still be listening on that port — a determinism check whose
+  greenness meant less the more the code moved. The same trap was walked into by hand ten minutes
+  earlier, which is how it was noticed.
+- **Both fixtures were parsed through the real schema**, not eyeballed. `set_status@1.0.0` is
+  `reversible` with a `confirm_intent` commit step; `report_lost@1.0.0` is `irreversible` with
+  `human_step_up`; both declare **zero** secret inputs, which is what makes "it cannot carry the override"
+  structural rather than conventional.
+- **The new tests were sabotage-tested for vacuity**, because a test suite that cannot fail is worse than
+  none. Deleting `card.status = wanted` — so the app reports APPLIED, issues a confirmation and writes an
+  audit row while nothing actually changes, the exact phantom success this system exists to catch — turns
+  2 tests red. Suppressing the audit append turns 4 red. `mock/actions.ts` was restored byte-identically
+  after each, sha-verified.
+- **Redaction was measured end to end for the first time.** Until CRD0500 existed no screen rendered a
+  card number, so the §3.4 claim had never been exercised. The leak was first proven REACHABLE — the live
+  screen serves `4111111111114021` unmasked, as a real servicing screen would — and only then proven
+  masked: a real card replay's evidence contains zero occurrences of that PAN or of the seeded SSN.
+  Proving the leak reachable first is what stops a clean scan from being a vacuous one.
+
+The general point, and the reason this is in the log: **a green gate inherits the credibility of whoever
+checked it.** Three of four components here were reviewed by an independent adversary; the fourth was
+reviewed by the same session that commissioned it, which is weaker, and saying so is cheaper than having
+a reviewer discover it.
+→ *Determinism & error handling*, *Safety*, *Evidence*
+
 ## Cuts so far
 
 A fourth result state; a generic idempotency subsystem; dry-run/shadow mode; the `viewport_box`
@@ -593,3 +630,86 @@ strategy; per-action actor headers; a second classification system alongside `Da
 egress guard; Playwright tracing in committed evidence; and all scaling infrastructure — containers,
 VNC, co-browsing, queues, operator routing. §7 says none of it is rewarded.
 → *Cuts*
+
+## The app can change something, and three exits were only correct because it could not
+
+Every application route was a pure read. That single fact was quietly load-bearing in more places than
+anyone had counted, and removing it is one change rather than three because §3.4's risky-action
+separation, §3.6's escalation and the flagship capability were all blocked behind it.
+
+**One mutating transaction, and GET is refused for it.** `POST /screen/card-action` is the only route
+that changes anything; `GET` on the same path answers **405**, not a state change. That is deliberate: a
+mutating effect must not be reachable by a URL alone, or a URL copied out of an evidence log could
+re-trigger it. It also retires the old claim that the mock's only non-200 is the 404 fallthrough.
+
+**The audit trail is an INDEPENDENT record, and one rule keeps it deterministic: only mutating attempts
+append, never reads.** Replay's traffic is navigation-only today, but `settle()` polls on a wall clock
+and can re-observe, so a read-logging audit would make the app's state a function of machine speed —
+and the determinism check compares exactly that. DENIED rows are written too: without them "nothing
+happened" and "we refused you" are indistinguishable in the independent record, and a refusal is a pure
+function of state and inputs, so it is perfectly deterministic. The value of independence is that
+neither record is derived from the other — the automation's `events.jsonl` says what the run did, the
+app says what was done to it, so agreement is evidence and disagreement is a defect.
+
+**`srv.seq` was deleted rather than repurposed.** Its comment said "audit ordering only", but it
+incremented on *every* request — including the determinism checker's own two `/__admin/state` probes and
+every extra `observe()`-driven navigation — so anything derived from it diverges between two identical
+runs *by construction*. Ordering comes from the audit array's own index instead. Nothing read it.
+
+**Three measurements that changed the design, each of which cost a rewrite:**
+
+- **Strategy keys cannot be parameterised.** `substitute()` applies to `step.value` only; a target's
+  `strategies[].key` is a plain string the binding resolves. So a capability cannot select a row "by the
+  card number the caller passed" — the flow has to *type* the discriminator into a field instead.
+- **There is no `selectOption` verb.** `SurfaceAction` is a closed set — navigate, click, fill, press,
+  and the two dialog verbs. Widening it to drive a `<select>` would mean a new verb in the schema, the
+  gate's policy vocabulary and every adapter, so the card screen uses text fields the existing `fill`
+  already drives. The closed set did its job: it made the cost of a new primitive visible.
+- **`wait_and_retry` and `reload_screen` perform no action.** The executor merely re-enters the step
+  loop, and `observe()` issues no HTTP request, so a full-screen interstitial is never re-fetched and
+  the retries burn in milliseconds against a screen that cannot change. **A screen-shaped interstitial
+  is therefore unrecoverable by this engine.** The frozen plan's SYS0800 broadcast *screen* became a
+  broadcast **dialog**, which is a recoverable condition the engine can actually act on via the
+  `dismiss_dialog` already in the shipped `allowedActions`.
+
+**Risk is declared per step, not per input value — which forces two artifacts.** FREEZE and UNFREEZE are
+reversible; LOST_STOLEN is not. One artifact cannot hold both, because `steps[].risk` is static and
+refinement 7 makes the contract equal the maximum over its steps. So `msc.card.set_status@1.0.0` is
+reversible and runs unattended, and `msc.card.report_lost@1.0.0` is irreversible and escalates. The
+split is a feature: refinement 1 forbids a `secret` input, so `report_lost` is *structurally* unable to
+carry the supervisor override the app demands, and a person is required by the shape of the artifact
+rather than by a policy file.
+
+**And three exits in `runSteps` were lying by accident.** The run-budget timeout, the capability
+checkpoint and the two non-resolving ends of a human turn all reported `retry_safe` / `none`. Each was
+true only because no route could mutate. The checkpoint was the worst: it never consulted risk at all,
+so a capability that genuinely froze a card and then missed its confirmation invited the caller to
+double-commit — the §3.3 conflation the result contract exists to prevent, pointed at the caller instead
+of at the app. They now key on a run-scoped `committed` flag, set only *after* `surface.act` returns
+(an action the gate refused never ran) and on a human turn over a mutating step; the handoff exits also
+key on whether the surface **moved**, which is the only measurement available when automation cannot
+watch a person's hands. ABORT keeps `do_not_retry` — the operator said stop — but can no longer claim
+nothing changed. `tests/side-effect.test.ts` proves all three **both ways**, because a rule that fires
+on everything is as broken as one that fires on nothing.
+
+**What is still NOT built, and must not be implied:** app-side session-aware refusal. The mock has a
+mutating route for such a point to protect, but no notion of a session or a holder. It records the
+AUTHORITY a request carried — a row is `HUMAN` iff a supervisor override was supplied — which is an
+assumption about the deployment, not an enforcement. `src/control/lease.ts` once claimed the mock
+"refuses mutating requests while a human holds the session"; that was measurably false, was removed, and
+is not being written back.
+
+**Correction, same day: it was three exits fixed and nine, not three, that were wrong.** An adversarial
+pass over `runSteps` censused *every* `fail()` exit against the new flag. Six more still answered
+`sideEffectRisk: "none"` — the precondition hard failure, the unresolvable target, the read that yields
+nothing, the no-operator-channel return, the policy denial, and the non-human arm of the recoverable
+postcondition. The last of those was computing `mustReconcile` on one line and using it in only one arm
+of the very next ternary. The read exit is the one that matters most, because it is the shape the
+flagship actually has: `msc.card.set_status@1.0.0` ends `s07` click (reversible — the submit that freezes
+the card) then `s08` read (the confirmation number). Each of those five steps commits nothing *itself*,
+which is exactly why each looked defensible in isolation — but "may I retry?" is a question about the
+RUN, and a per-step answer to it is the same §3.3 conflation one level up. All six now key on the
+run-scoped flag; it is strictly one-directional, so it can only upgrade `retry_safe` to
+`reconcile_required`, never the reverse. The lesson worth keeping: a flag introduced to fix three named
+sites needs a census of every site that could have used it, or the fix is only as wide as the brief.
+→ *Determinism & error handling*, *Safety*, *Escalation & handoff*, *Cuts*

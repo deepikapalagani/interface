@@ -6,20 +6,44 @@
  *  1. DETERMINISM. All state is in memory from `freshState()`, and the clock is
  *     FROZEN. Rendered output is therefore byte-identical across runs, which is
  *     what lets "replay is deterministic" be checked by diffing rather than
- *     asserted.
+ *     asserted. Everything that can change — card statuses, the confirmation
+ *     counter, the audit trail, the armed fault — is rebuilt by
+ *     `POST /__admin/reset`, so two identical `reset -> run` sequences leave the
+ *     app in byte-identical states.
  *
- *  2. NO RANDOMNESS ANYWHERE. Every condition is a pure function of (seed,
- *     armed faults, session state). Probabilistic faults are refused on
- *     principle: a lucky replay must never be able to pass.
+ *  2. NO RANDOMNESS ANYWHERE. Every condition is a pure function of (seed, armed
+ *     fault, request). A fault must be ARMED EXPLICITLY through the admin plane
+ *     and fires on a stated condition, then disarms itself. Probabilistic faults
+ *     are refused on principle: a lucky replay must never be able to pass.
  *
- *  3. AN AUDIT TRAIL OF ITS OWN. The app records what was done to it, so the
- *     automation's evidence can be reconciled against an independent record —
- *     which is how a phantom success gets caught.
+ *  3. AN AUDIT TRAIL OF ITS OWN — AND IT IS NOW WRITTEN. Every attempt at the one
+ *     mutating transaction appends exactly one row, applied or denied, and
+ *     `/screen/audit` renders every field of it.
+ *
+ *     What it is FOR: the automation's `events.jsonl` says "step s07 acted, then
+ *     s08 read CNF4401"; the app's trail says "AUTOMATION applied FREEZE 4021 to
+ *     400200101 on CRD0500, confirmation CNF4401, APPLIED". NEITHER IS DERIVED
+ *     FROM THE OTHER — one is written by the run, one by the app — so agreement
+ *     is evidence and disagreement is a defect. A run claiming success against a
+ *     trail with no APPLIED row is a phantom success; an APPLIED row the run
+ *     never saw is the dangerous direction, and the reason a replay interrupted
+ *     by `abend_after_commit` reports `reconcile_required` rather than guessing.
+ *
+ *     ONLY MUTATING ATTEMPTS APPEND. Reads never do, and that single rule is what
+ *     keeps the trail deterministic: `settle()` polls on a wall clock and can
+ *     re-observe, so a read-logging trail would make the app's final state a
+ *     function of machine speed.
+ *
+ * The mock has NO notion of a session or a holder, and nothing here refuses a
+ * request because a human holds the session. `src/control/lease.ts` must not
+ * claim otherwise.
  */
 import http from "node:http";
 import { tenantByKey, type TenantConfig } from "./tenant.js";
-import { freshState, nextConfirmation, type MockState } from "./seed.js";
+import { applyCardAction } from "./actions.js";
+import { freshState, isFaultName, FAULTS, type MockState } from "./seed.js";
 import * as screens from "./screens.js";
+import type { CardScreenFaults } from "./screens.js";
 
 /**
  * The clock is FROZEN, not ticking.
@@ -30,7 +54,7 @@ import * as screens from "./screens.js";
  * spurious byte differences between two otherwise identical runs. Measured
  * 2026-09-12. The plan called for a per-request tick; this deviates from it
  * deliberately, because a frozen clock is both simpler and strictly more
- * deterministic. Ordering is carried by the audit sequence number, which is what
+ * deterministic. Ordering is carried by the audit row's own index, which is what
  * actually needs to be monotonic.
  */
 const VIRTUAL_NOW = "2026-03-02T14:05:00Z";
@@ -39,8 +63,6 @@ const CLOCK = VIRTUAL_NOW.slice(11, 19);
 interface Server {
   readonly tenant: TenantConfig;
   state: MockState;
-  /** Monotonic request counter. Used for audit ordering only — never rendered. */
-  seq: number;
 }
 
 const html = (res: http.ServerResponse, body: string, status = 200): void => {
@@ -53,28 +75,97 @@ const json = (res: http.ServerResponse, body: unknown, status = 200): void => {
   res.end(JSON.stringify(body, null, 1));
 };
 
+/** Bounded: a body that never ends must not be able to hold a socket open forever. */
+const MAX_BODY_BYTES = 64 * 1024;
+
+const readBody = (req: http.IncomingMessage): Promise<string> =>
+  new Promise((resolve, reject) => {
+    let body = "";
+    let oversize = false;
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString("utf8");
+      if (body.length > MAX_BODY_BYTES) {
+        oversize = true;
+        req.destroy();
+      }
+    });
+    req.on("end", () => (oversize ? reject(new Error("request body too large")) : resolve(body)));
+    req.on("error", reject);
+  });
+
+/**
+ * A one-shot CRD0500 fault, consumed by the render it fires on.
+ *
+ * Self-disarming is what lets a declared "recover and continue" rule terminate:
+ * the second attempt meets a clean screen rather than the same dialog forever.
+ */
+const takeCardScreenFault = (state: MockState): CardScreenFaults => {
+  if (state.armedFault === "broadcast") {
+    state.armedFault = null;
+    return { broadcast: true, confirmSubmit: false };
+  }
+  if (state.armedFault === "confirm_submit") {
+    state.armedFault = null;
+    return { broadcast: false, confirmSubmit: true };
+  }
+  return { broadcast: false, confirmSubmit: false };
+};
+
 export const createServer = (tenant: TenantConfig): http.Server => {
-  const srv: Server = { tenant, state: freshState(), seq: 0 };
+  const srv: Server = { tenant, state: freshState() };
   const t = tenant;
 
-  return http.createServer((req, res) => {
-    srv.seq += 1;
+  const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
 
-    // ---- admin plane. The allowlist denies these routes to the automation,
-    //      which is what stops a capability from arming its own faults.
+    // ---- admin plane. The allowlist denies /__admin to the automation, which is
+    //      what stops a capability from arming its own faults or resetting the
+    //      app it is being measured against.
     if (path === "/__admin/reset" && req.method === "POST") {
       srv.state = freshState();
-      srv.seq = 0;
       return json(res, { reset: true, tenant: t.id });
     }
+
+    if (path === "/__admin/fault" && req.method === "POST") {
+      const names = FAULTS.map((f) => f.name);
+      let requested: unknown;
+      try {
+        requested = (JSON.parse((await readBody(req)) || "{}") as { fault?: unknown }).fault;
+      } catch {
+        return json(res, { error: "body must be JSON", faults: names }, 400);
+      }
+      if (requested === "none") {
+        srv.state.armedFault = null;
+        return json(res, { armedFault: null, faults: names });
+      }
+      if (typeof requested !== "string" || !isFaultName(requested)) {
+        // Loudly, and naming the legal set: a typo must never look like a
+        // successful arming, or a fault demo would silently prove nothing.
+        return json(res, { error: `unknown fault ${JSON.stringify(requested)}`, faults: names }, 400);
+      }
+      srv.state.armedFault = requested;
+      return json(res, { armedFault: requested, faults: names });
+    }
+
     if (path === "/__admin/state") {
+      // Everything that can CHANGE, and nothing that cannot. Card statuses are
+      // here because a status flip was previously invisible to the determinism
+      // checker, whose comparison was consequently vacuous. Last four and status
+      // only — never a PAN, never an SSN: the admin plane is not covered by the
+      // evidence leak scan, so it must not be a place a secret can be picked up.
       return json(res, {
         tenant: t.id,
         confirmationSeq: srv.state.confirmationSeq,
+        armedFault: srv.state.armedFault,
         audit: srv.state.audit,
         members: Object.keys(srv.state.members),
+        cards: Object.fromEntries(
+          Object.entries(srv.state.members).map(([id, m]) => [
+            id,
+            m.cards.map((c) => ({ last4: c.last4, status: c.status })),
+          ]),
+        ),
       });
     }
 
@@ -102,12 +193,78 @@ export const createServer = (tenant: TenantConfig): http.Server => {
       return html(res, screens.detail(t, CLOCK, member));
     }
 
+    if (path === "/screen/cards") {
+      const id = (url.searchParams.get("id") ?? "").trim();
+      const member = srv.state.members[id];
+      // Mirrors /screen/detail exactly, so MEMBER_NOT_FOUND is detectable on this
+      // path too rather than only on the search path.
+      if (!member) return html(res, screens.results(t, CLOCK, []));
+      return html(res, screens.cardServices(t, CLOCK, member, null, takeCardScreenFault(srv.state)));
+    }
+
+    /**
+     * THE ONLY MUTATING APPLICATION ROUTE.
+     *
+     * POST-only by design: a mutating effect must not be reachable by a URL
+     * alone, so a URL copied out of a log can never re-trigger a state change.
+     */
+    if (path === "/screen/card-action") {
+      if (req.method !== "POST") return html(res, screens.methodNotAllowed(t, CLOCK), 405);
+
+      const form = new URLSearchParams(await readBody(req));
+      // Fields are read through the tenant map exactly as /screen/results reads
+      // MEMBER_ID; only `id` is a literal, as /screen/detail already uses.
+      const memberId = (form.get("id") ?? "").trim();
+      const last4 = (form.get(t.fields["CARD_SELECT"] ?? "SEL") ?? "").trim();
+      const action = (form.get(t.fields["CARD_ACTION"] ?? "CACT") ?? "").trim();
+      const override = (form.get(t.fields["OVERRIDE_CODE"] ?? "OVRCD") ?? "").trim();
+
+      const outcome = applyCardAction(srv.state, {
+        memberId,
+        last4,
+        action,
+        override,
+        at: VIRTUAL_NOW,
+        screen: t.screenIds["CARD_SERVICES"] ?? "CRD0500",
+      });
+
+      const member = srv.state.members[memberId];
+      if (!member) return html(res, screens.results(t, CLOCK, []));
+
+      if (outcome.screen === "CONFIRMATION" && outcome.confirmation !== null && outcome.card !== null) {
+        // THE FLAGSHIP FAULT. The change has ALREADY been applied and the APPLIED
+        // row has ALREADY been written by the time we get here — that is the
+        // whole point. The caller is shown an abend and cannot tell what
+        // committed, which is exactly the state `reconcile_required` exists for.
+        if (srv.state.armedFault === "abend_after_commit") {
+          srv.state.armedFault = null;
+          return html(res, screens.abend(t, CLOCK));
+        }
+        return html(
+          res,
+          screens.confirmation(t, CLOCK, member, {
+            last4: outcome.card.last4,
+            action,
+            status: outcome.newStatus ?? outcome.card.status,
+            confirmation: outcome.confirmation,
+          }),
+        );
+      }
+
+      return html(res, screens.cardServices(t, CLOCK, member, outcome.message, takeCardScreenFault(srv.state)));
+    }
+
     return html(res, screens.notFound(t, CLOCK), 404);
+  };
+
+  return http.createServer((req, res) => {
+    handle(req, res).catch((error: unknown) => {
+      // A malformed request must not take the server down mid-run, and must not
+      // be reported as a rendered screen either — a 400 here is unambiguous.
+      if (!res.headersSent) json(res, { error: error instanceof Error ? error.message : String(error) }, 400);
+    });
   });
 };
-
-/** Exported for tests, which drive confirmations without going through the UI. */
-export const issueConfirmation = (state: MockState): string => nextConfirmation(state);
 
 /* ------------------------------------------------------------------ cli */
 
@@ -123,5 +280,6 @@ if (isMain) {
     console.log(`${tenant.product} (${tenant.institution}) on http://localhost:${port}/`);
     console.log(`  tenant=${tenant.id}  content frame="${tenant.contentFrame}"  member id field="${tenant.fields["MEMBER_ID"]}"`);
     console.log(`  virtual clock FROZEN at ${VIRTUAL_NOW} — rendered output does not depend on request count`);
+    console.log(`  faults (armed via npm run mock:fault): ${FAULTS.map((f) => f.name).join(", ")}`);
   });
 }

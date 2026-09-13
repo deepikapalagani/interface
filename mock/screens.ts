@@ -92,7 +92,23 @@ ${labelledField(t.labels["LAST_NAME"] ?? "LAST NAME", t.fields["LAST_NAME"] ?? "
  */
 export const results = (t: TenantConfig, clock: string, matches: readonly Member[]): string => {
   const cols = t.resultColumns;
-  const header = cols.map((c) => `<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>${esc(c)}</b></font></td>`).join("");
+  // ONE TRAILING COLUMN, and it is what makes the results -> detail hop
+  // targetable at all. The `OPEN <id>` links below the grid sit outside any
+  // <tr>, so a structural anchor — which resolves "the row containing this
+  // label, then the control inside that row" — could never reach them. The
+  // header cell is the literal "ACTION" and the body cell carries the tenant's
+  // OPEN_MEMBER label, so the header row can never match the anchor key.
+  //
+  // With one match there is exactly one data row and the anchor resolves 1; with
+  // two, `locate()` refuses rather than guessing, which is the correct behaviour
+  // for a flow that must open a named member.
+  //
+  // `resultColumns` is deliberately untouched, so tenant B's extra leading column
+  // still breaks anything reading the grid by index.
+  const open = t.labels["OPEN_MEMBER"] ?? "SELECT";
+  const header =
+    cols.map((c) => `<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>${esc(c)}</b></font></td>`).join("") +
+    `<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>ACTION</b></font></td>`;
   const cell = (v: string) => `<td><font face="Arial" size="1">${esc(v)}</font></td>`;
   const rows = matches
     .map((m) => {
@@ -100,7 +116,10 @@ export const results = (t: TenantConfig, clock: string, matches: readonly Member
         BRANCH: m.branch, MBR: m.id, NAME: m.name,
         TYPE: m.accounts[0]?.type ?? "", BALANCE: m.accounts[0]?.balance ?? "", STATUS: m.accounts[0]?.status ?? "",
       };
-      return `<tr>${cols.map((c) => cell(base[c] ?? "")).join("")}</tr>`;
+      return (
+        `<tr>${cols.map((c) => cell(base[c] ?? "")).join("")}` +
+        `<td><font face="Arial" size="1"><a href="/screen/detail?id=${esc(m.id)}">${esc(open)}</a></font></td></tr>`
+      );
     })
     .join("\n");
   const empty = `<font face="Arial" size="2" color="#7E1416">NO RECORDS MATCH SELECTION — MSG 0071</font>`;
@@ -119,25 +138,152 @@ export const detail = (t: TenantConfig, clock: string, m: Member): string =>
 <tr><td><font face="Arial" size="2">MEMBER</font></td><td><font face="Arial" size="2">${esc(m.id)} &nbsp; ${esc(m.name)}</font></td></tr>
 <tr><td><font face="Arial" size="2">SSN</font></td><td><font face="Arial" size="2">${esc(m.ssn)}</font></td></tr>
 <tr><td><font face="Arial" size="2">BRANCH</font></td><td><font face="Arial" size="2">${esc(m.branch)}</font></td></tr>
+<tr><td><font face="Arial" size="2">${esc(t.labels["CARD_SERVICES_LINK"] ?? "CARD SERVICES")}</font></td><td><font face="Arial" size="2"><a href="/screen/cards?id=${esc(m.id)}">OPEN</a></font></td></tr>
 </table><br>
 <table border="1" cellspacing="0" cellpadding="2">
 <tr><td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>SUFFIX</b></font></td>
 <td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>TYPE</b></font></td>
 <td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>BALANCE</b></font></td></tr>
 ${m.accounts.map((a) => `<tr><td><font face="Arial" size="1">${esc(a.suffix)}</font></td><td><font face="Arial" size="1">${esc(a.type)}</font></td><td align="right"><font face="Arial" size="1">${esc(a.balance)}</font></td></tr>`).join("")}
-</table><br>
-<a href="/screen/cards?id=${esc(m.id)}"><font face="Arial" size="2">CARD SERVICES</font></a>`);
-
-export const auditInquiry = (t: TenantConfig, clock: string, state: MockState): string =>
-  page(`${chrome(t, t.screenIds["AUDIT_INQUIRY"] ?? "AUD9500", "AUDIT INQUIRY", clock)}
-<table border="1" cellspacing="0" cellpadding="2">
-<tr><td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>AT</b></font></td>
-<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>ACTOR</b></font></td>
-<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>ACTION</b></font></td>
-<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>CONFIRMATION</b></font></td>
-<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>OUTCOME</b></font></td></tr>
-${state.audit.map((r) => `<tr><td><font face="Arial" size="1">${esc(r.at)}</font></td><td><font face="Arial" size="1">${esc(r.actor)}</font></td><td><font face="Arial" size="1">${esc(r.action)}</font></td><td><font face="Arial" size="1">${esc(r.confirmation ?? "")}</font></td><td><font face="Arial" size="1">${esc(r.outcome)}</font></td></tr>`).join("")}
 </table>`);
+
+/** Faults armed against the card screen, resolved by the caller before rendering. */
+export interface CardScreenFaults {
+  /** Queue a native alert() after load — a RECOVERABLE dialog. */
+  readonly broadcast: boolean;
+  /** Put a confirm() on the form's submit — an UNDECLARED dialog that blocks it. */
+  readonly confirmSubmit: boolean;
+}
+
+/**
+ * CRD0500 — the only screen from which anything can be changed.
+ *
+ * NO NESTED TABLES, anywhere on this screen, and that is a hard structural
+ * requirement rather than a style preference: `table_anchor` resolves a target as
+ * "the <tr> containing this label, then the control inside it", and Playwright's
+ * `hasText` matches ANCESTOR rows too. One nested table would make every anchor
+ * on the screen resolve 2 and `locate()` would refuse all of them. Every labelled
+ * row therefore holds exactly ONE control, and the four tables here are siblings.
+ *
+ * The PAN is rendered UNMASKED in the grid. That is the entire point of this
+ * screen existing: it is the redaction target, so masking at capture time is
+ * proven against a screen that really does leak rather than asserted. No
+ * capability target ever resolves to that cell.
+ *
+ * The hidden member id sits INSIDE the form but OUTSIDE the table, so it cannot
+ * be picked up as the control belonging to any labelled row.
+ */
+export const cardServices = (
+  t: TenantConfig,
+  clock: string,
+  m: Member,
+  message: string | null,
+  faults: CardScreenFaults,
+): string =>
+  page(`${chrome(t, t.screenIds["CARD_SERVICES"] ?? "CRD0500", "CARD SERVICES", clock)}
+<table border="0" cellpadding="2">
+<tr><td><font face="Arial" size="2">MEMBER</font></td><td><font face="Arial" size="2">${esc(m.id)} &nbsp; ${esc(m.name)}</font></td></tr>
+</table><br>
+<table border="1" cellspacing="0" cellpadding="2">
+<tr><td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>CARD NO</b></font></td>
+<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>PRODUCT</b></font></td>
+<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>${esc(t.labels["CARD_STATUS"] ?? "CARD STATUS")}</b></font></td></tr>
+${m.cards.map((c) => `<tr><td><font face="Arial" size="1">${esc(c.pan)}</font></td><td><font face="Arial" size="1">${esc(c.product)}</font></td><td><font face="Arial" size="1">${esc(c.status)}</font></td></tr>`).join("")}
+</table><br>
+${message === null ? "" : `<font face="Arial" size="2" color="#7E1416">${esc(message)}</font><br><br>`}
+<form action="/screen/card-action" method="post"${faults.confirmSubmit ? ` onsubmit="return confirm('CONFIRM CARD STATUS CHANGE')"` : ""}>
+<input type="hidden" name="id" value="${esc(m.id)}">
+<table border="0" cellpadding="3">
+${labelledField(t.labels["CARD_SELECT"] ?? "CARD (LAST 4)", t.fields["CARD_SELECT"] ?? "SEL", 6, 4)}
+${labelledField(t.labels["CARD_ACTION"] ?? "ACTION", t.fields["CARD_ACTION"] ?? "CACT", 14, 12)}
+${labelledField(t.labels["OVERRIDE_CODE"] ?? "OVERRIDE CODE", t.fields["OVERRIDE_CODE"] ?? "OVRCD", 10, 10)}
+<tr><td>&nbsp;</td><td><input type="image" src="${SUBMIT_GIF}" alt="" width="60" height="20" name="${esc(t.fields["CARD_APPLY"] ?? "APPLY")}"></td></tr>
+</table></form>
+${faults.broadcast ? `<script>setTimeout(function(){alert('SYSTEM BROADCAST: NIGHTLY MAINTENANCE 22:00')},0)</script>` : ""}`);
+
+export interface ConfirmationDetail {
+  /** The last four ONLY. The PAN never reaches this screen. */
+  readonly last4: string;
+  /** The action code, echoed verbatim so a checkpoint can assert it. */
+  readonly action: string;
+  readonly status: string;
+  readonly confirmation: string;
+}
+
+/**
+ * CNF9000 — proof that a specific card was changed.
+ *
+ * ONE flat label/value table, and exactly ONE row may contain the CONFIRMATION
+ * label literal: `PlaywrightSurface.read()`'s static-text fallback anchors a row
+ * by its label and reads the next cell, and it requires `row.count() === 1`. The
+ * title is deliberately "CARD STATUS CHANGE ACCEPTED" rather than anything
+ * containing "CONFIRMATION", for the same reason.
+ *
+ * Echoing the action code and the last four is what makes the checkpoint prove
+ * the RIGHT card was changed, rather than merely that some confirmation appeared.
+ */
+export const confirmation = (t: TenantConfig, clock: string, m: Member, detail: ConfirmationDetail): string =>
+  page(`${chrome(t, t.screenIds["CONFIRMATION"] ?? "CNF9000", "CARD STATUS CHANGE ACCEPTED", clock)}
+<table border="0" cellpadding="2">
+<tr><td><font face="Arial" size="2">MEMBER</font></td><td><font face="Arial" size="2">${esc(m.id)} &nbsp; ${esc(m.name)}</font></td></tr>
+<tr><td><font face="Arial" size="2">CARD</font></td><td><font face="Arial" size="2">${esc(detail.last4)}</font></td></tr>
+<tr><td><font face="Arial" size="2">ACTION</font></td><td><font face="Arial" size="2">${esc(detail.action)}</font></td></tr>
+<tr><td><font face="Arial" size="2">NEW STATUS</font></td><td><font face="Arial" size="2">${esc(detail.status)}</font></td></tr>
+<tr><td><font face="Arial" size="2">${esc(t.labels["CONFIRMATION"] ?? "CONFIRMATION")}</font></td><td><font face="Arial" size="2">${esc(detail.confirmation)}</font></td></tr>
+</table>`);
+
+/**
+ * SYS0500 — the transaction was interrupted AFTER it committed.
+ *
+ * The screen deliberately cannot tell you whether anything landed, because the
+ * real one cannot either. That is what makes it the honest trigger for
+ * `reconcile_required`: the truth is in AUDIT INQUIRY and nowhere else.
+ */
+export const abend = (t: TenantConfig, clock: string): string =>
+  page(`${chrome(t, "SYS0500", "SYSTEM ABEND — TRANSACTION INTERRUPTED", clock)}
+<font face="Arial" size="2">THE TRANSACTION WAS INTERRUPTED. THIS SCREEN CANNOT REPORT WHETHER IT COMMITTED — CONSULT AUDIT INQUIRY.</font>`);
+
+/**
+ * SYS0405 — a mutating effect must not be reachable by a URL alone.
+ *
+ * Deliberate: a URL copied out of a log can never re-trigger a state change,
+ * because the only route that changes anything refuses GET.
+ */
+export const methodNotAllowed = (t: TenantConfig, clock: string): string =>
+  page(`${chrome(t, "SYS0405", "METHOD NOT ALLOWED", clock)}
+<font face="Arial" size="2">THIS TRANSACTION MUST BE SUBMITTED FROM ITS OWN SCREEN.</font>`);
+
+/**
+ * Every field of `AuditRow`, in render order.
+ *
+ * Exported so a test can assert this list covers the row type exactly. Recording
+ * nine facts and rendering five is the same declared-but-unshipped gap this whole
+ * screen exists to close — and the two that were previously missing, `screen` and
+ * `memberId`, are precisely the ones a reconciler needs to tie a row to a run.
+ */
+export const AUDIT_COLUMNS = [
+  "SEQ", "AT", "ACTOR", "SCREEN", "ACTION", "MEMBER", "CONFIRMATION", "OUTCOME", "DETAIL",
+] as const;
+
+export const auditInquiry = (t: TenantConfig, clock: string, state: MockState): string => {
+  const head = AUDIT_COLUMNS.map(
+    (c) => `<td bgcolor="#dfe3e6"><font face="Arial" size="1"><b>${esc(c)}</b></font></td>`,
+  ).join("");
+  const cell = (v: string): string => `<td><font face="Arial" size="1">${esc(v)}</font></td>`;
+  const rows = state.audit
+    .map((r) =>
+      `<tr>${[
+        String(r.seq), r.at, r.actor, r.screen, r.action,
+        r.memberId ?? "", r.confirmation ?? "", r.outcome, r.detail,
+      ].map(cell).join("")}</tr>`,
+    )
+    .join("");
+  return page(`${chrome(t, t.screenIds["AUDIT_INQUIRY"] ?? "AUD9500", "AUDIT INQUIRY", clock)}
+<table border="1" cellspacing="0" cellpadding="2">
+<tr>${head}</tr>
+${rows}
+</table>`);
+};
 
 export const notFound = (t: TenantConfig, clock: string): string =>
   page(`${chrome(t, "SYS0404", "SCREEN NOT FOUND", clock)}<font face="Arial" size="2">NO SUCH SCREEN.</font>`);

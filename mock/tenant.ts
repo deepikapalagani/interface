@@ -63,12 +63,18 @@ export const tenantA: TenantConfig = {
     CARD_SELECT: "SEL",
     CARD_ACTION: "CACT",
     OVERRIDE_CODE: "OVRCD",
+    CARD_APPLY: "APPLY",
   },
   labels: {
     MEMBER_ID: "MEMBER ID",
     LAST_NAME: "LAST NAME",
     CARD_STATUS: "CARD STATUS",
     CONFIRMATION: "CONFIRMATION",
+    CARD_SELECT: "CARD (LAST 4)",
+    CARD_ACTION: "ACTION",
+    OVERRIDE_CODE: "OVERRIDE CODE",
+    CARD_SERVICES_LINK: "CARD SERVICES",
+    OPEN_MEMBER: "SELECT",
   },
   resultColumns: ["MBR", "NAME", "TYPE", "BALANCE", "STATUS"],
   requiresReasonCode: false,
@@ -100,12 +106,31 @@ export const tenantB: TenantConfig = {
     CARD_SELECT: "CARDSEL",
     CARD_ACTION: "CARDACT",
     OVERRIDE_CODE: "SUPCODE",
+    CARD_APPLY: "DOACT",
   },
   labels: {
     MEMBER_ID: "MEMBER NO",
     LAST_NAME: "SURNAME",
     CARD_STATUS: "CARD STATUS",
     CONFIRMATION: "REFERENCE",
+    // MEASURED COLLISION, recorded rather than hidden. CRD0500's card grid
+    // renders a static "CARD NO" header, and `table_anchor` matches any ROW
+    // containing its key as a case-insensitive substring — so on THIS tenant the
+    // CARD_SELECT anchor matches the header row as well as its own form row and
+    // resolves 2, which `locate()` refuses rather than guessing.
+    //
+    // Left as-is deliberately: tenant B exists to expose the variation a binding
+    // CANNOT absorb, and this is a second instance of it alongside
+    // `requiresReasonCode`. A tenant-B binding would have to change the label or
+    // the vendor would have to change the header; neither is something the
+    // artifact can express, which is the point. Tenant A, which every fixture and
+    // every run targets, is collision-free — see tests/mock-app.test.ts, which
+    // pins both facts.
+    CARD_SELECT: "CARD NO",
+    CARD_ACTION: "ACTION CODE",
+    OVERRIDE_CODE: "SUPERVISOR CODE",
+    CARD_SERVICES_LINK: "CARDS",
+    OPEN_MEMBER: "VIEW",
   },
   // One extra leading column: anything reading by grid index silently reads wrong.
   resultColumns: ["BRANCH", "MBR", "NAME", "TYPE", "BALANCE", "STATUS"],

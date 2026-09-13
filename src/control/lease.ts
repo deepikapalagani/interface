@@ -22,13 +22,35 @@
  * cannot be issued into the session afterwards, because its epoch no longer
  * matches.
  *
+ * ── THE THIRD POINT, WHICH IS NOT BUILT ─────────────────────────────────────
+ *
  * An app-side enforcement point — the target application itself refusing a write
- * while a human holds the session — is impossible against this mock, and that is
- * recorded here rather than papered over. MEASURED: the mock has no notion of a
- * holder, a human or a session; every application route is a pure read
- * (mock/main.ts:82-103), nothing anywhere appends to `state.audit`, and its only
- * non-200 is the 404 fallthrough. There is no mutating route for such a point to
- * protect, so claiming one would be describing a system that does not exist.
+ * while a human holds the session — is NOT implemented. This paragraph exists so
+ * that stays visible: an earlier version of it claimed a second point lived "in
+ * the mock itself, which refuses mutating requests while a human holds the
+ * session", which was measurably false and was removed. Nothing here re-asserts
+ * it.
+ *
+ * What changed is the PREMISE, not the conclusion, and the difference matters
+ * because the old premise was doing the arguing. It used to read: every
+ * application route is a pure read, nothing appends to the audit trail, so there
+ * is no mutating route for such a point to protect. All three clauses are now
+ * false — `POST /screen/card-action` mutates, and `mock/actions.ts` appends an
+ * audit row for every attempt against a real membership, refusals included. So
+ * there is finally something for a third point to protect.
+ *
+ * It is still not built, now for the honest reason rather than the accidental
+ * one: the mock has no notion of a holder, a human or a session, so it cannot
+ * refuse anything on those grounds. What it records instead is the AUTHORITY a
+ * request carried, never who was at the keyboard — a row is attributed `HUMAN`
+ * iff the request carried a supervisor override code. That is an assumption
+ * about the deployment (only a supervisor holds that code), not an enforcement,
+ * and it is worth exactly what such an assumption is worth.
+ *
+ * A real third point would refuse a mutating request bearing an AUTOMATION
+ * session token while a human turn is open. That is the only version of the
+ * claim that survives a bug in BOTH points above, and it needs the application
+ * to model a session — which this one does not.
  */
 import { SurfaceRefused } from "../surface/types.js";
 

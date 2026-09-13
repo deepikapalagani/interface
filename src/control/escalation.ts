@@ -36,10 +36,14 @@
  * gate) and the driver's own human-turn lock (`LiveSession.beginHumanTurn`,
  * armed below BEFORE any banner is painted, so a banner that fails to render
  * still leaves the session locked). They share no state, which is the point. The
- * TARGET APP is not a third: the mock has no notion of a holder or a session,
- * every application route is a pure read, and it has no mutating route for a
- * third point to protect. What a mutating route would add is stated in the
- * write-up rather than implied here.
+ * TARGET APP is not a third — but the reason has narrowed, and the old one has
+ * expired. It used to be that every application route was a pure read, so there
+ * was no mutating route for a third point to protect. There is one now
+ * (`POST /screen/card-action`), and an audit trail recording every attempt
+ * against it. The app still has no notion of a holder or a session, so it cannot
+ * refuse a write on the grounds that a person is driving, and nothing here
+ * pretends otherwise: what it records is the authority a request carried, never
+ * who was at the keyboard. `src/control/lease.ts` states that limit in full.
  */
 import type { EscalationRecord } from "../contract/result.js";
 import type { EventSequencer } from "../evidence/events.js";

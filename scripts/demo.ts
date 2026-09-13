@@ -16,7 +16,7 @@
  * offline pass is evidence about today's code rather than a recording of a good
  * day. (That guard was itself broken until 2026-09-12: see src/model/cassette.ts.)
  *
- * ── WHY TWO ARTIFACTS APPEAR BELOW ──────────────────────────────────────────
+ * ── WHY THREE ARTIFACTS APPEAR BELOW ────────────────────────────────────────
  *
  * The discovered artifact is replayed first, because that round trip IS the
  * headline claim. It cannot demonstrate the three result classes, though: the
@@ -25,6 +25,13 @@
  * pass that is not built. So the three-class demonstration uses the committed
  * `lookup@1.0.0` fixture, which declares a typed `member_id`. Stated here rather
  * than glossed, because quietly swapping artifacts would overclaim.
+ *
+ * A THIRD artifact then does the one thing neither of those can: it CHANGES
+ * something. `lookup@1.0.0` is read-only end to end, so a demo built only on it
+ * shows the three result classes over a surface where every class is free. The
+ * card capability commits a real status change, which is what makes the risk
+ * classes, the app's own audit trail and an idempotent "already in that status"
+ * answer demonstrable rather than described.
  *
  * Writes nothing into /evidence/ — that tree is a graded deliverable checked by
  * `scripts/verify-evidence.ts`. Everything here goes to a temp directory whose
@@ -39,12 +46,21 @@ import { createServer } from "../mock/main.js";
 import { tenantA } from "../mock/tenant.js";
 
 const CAPABILITY = "tests/fixtures/lookup@1.0.0.json";
+/** The mutating flow: the only capability here whose replay changes the app. */
+const SET_STATUS = "tests/fixtures/set_status@1.0.0.json";
+/** Named only in the closing §3.6 hint — running it needs a person, so the demo never does. */
+const REPORT_LOST = "tests/fixtures/report_lost@1.0.0.json";
 const BINDING = "tests/fixtures/fcu@4.2.json";
 /** The recorded run the offline path replays. Committed, so `demo:offline` needs nothing. */
 const CASSETTE = "evidence/runs/discovery-lookup-v3/transcript.jsonl";
 
 const MEMBER = "400200101";
 const ABSENT = "400299999";
+/** Seeded ACTIVE, so FREEZE genuinely changes it. */
+const CARD = "4021";
+/** Seeded already FROZEN — the input that makes FREEZE an idempotent request rather than a change. */
+const FROZEN_MEMBER = "400203344";
+const FROZEN_CARD = "9090";
 
 const offline = process.argv.includes("--provider") && process.argv.includes("cassette");
 
@@ -182,15 +198,51 @@ const main = async (): Promise<void> => {
       `status ${statusOf(badInput.out)}, exit ${badInput.code}`,
     );
 
-    /* ---- 4. SUMMARY -------------------------------------------------------- */
+    /* ---- 4. A CAPABILITY THAT CHANGES SOMETHING ---------------------------- */
+    rule("4. A MUTATING CAPABILITY — the same three classes, now over an action with a real effect");
+
+    const freeze = await cli("src/replay/main.ts", [
+      "--capability", SET_STATUS, "--binding", BINDING, "--target", target,
+      "--input", `member_id=${MEMBER}`, "--input", `card_last4=${CARD}`, "--input", "action=FREEZE",
+      "--evidence", evidence, "--run-id", "demo-freeze",
+    ]);
+    record(
+      "a reversible card status change replays with no model in the loop",
+      statusOf(freeze.out) === "success" && /"modelCalls": 0/.test(freeze.out),
+      `status ${statusOf(freeze.out)}, exit ${freeze.code}, modelCalls 0`,
+    );
+
+    /**
+     * The same request against a card that is ALREADY frozen. The world is
+     * already as the caller asked for, so the app answers rather than fails —
+     * and the run exits 0. Reporting this as an error is what would make an
+     * idempotent retry look like a broken system.
+     */
+    const alreadyFrozen = await cli("src/replay/main.ts", [
+      "--capability", SET_STATUS, "--binding", BINDING, "--target", target,
+      "--input", `member_id=${FROZEN_MEMBER}`, "--input", `card_last4=${FROZEN_CARD}`, "--input", "action=FREEZE",
+      "--evidence", evidence, "--run-id", "demo-already-frozen",
+    ]);
+    record(
+      "NOT a failure: a card already in the requested status is a business outcome, and exits 0",
+      statusOf(alreadyFrozen.out) === "business_outcome" && alreadyFrozen.code === 0,
+      `status ${statusOf(alreadyFrozen.out)}, exit ${alreadyFrozen.code}`,
+    );
+
+    /* ---- 5. SUMMARY -------------------------------------------------------- */
     rule("SUMMARY");
     const failed = checks.filter((c) => !c.ok);
     for (const c of checks) console.log(`  ${c.ok ? "PASS" : "FAIL"}  ${c.label}`);
     console.log(`\n  evidence written to ${evidence}`);
     console.log("  §3.6 handoff is not exercised here: it needs a person, or the headless proof in");
-    console.log("  tests/handoff.integration.test.ts. To drive it by hand:");
-    console.log("    npm run replay -- --headed --operator --policy tests/fixtures/policy-escalate.json \\");
-    console.log(`      --capability ${CAPABILITY} --binding ${BINDING} --input member_id=${MEMBER}`);
+    console.log("  tests/handoff.integration.test.ts. To drive it by hand — note there is NO --policy");
+    console.log("  file below, and that is the point: report_lost's committing step is IRREVERSIBLE, the");
+    console.log("  SHIPPED policy rates irreversible as 'confirm', and the artifact declares no override");
+    console.log("  input because the schema forbids a secret one. So it cannot supply the authority the");
+    console.log("  app demands, and the only way the step completes is a person in the live session:");
+    console.log("    npm run replay -- --headed --operator \\");
+    console.log(`      --capability ${REPORT_LOST} --binding ${BINDING} \\`);
+    console.log(`      --input member_id=${MEMBER} --input card_last4=${CARD}`);
 
     if (failed.length > 0) {
       console.error(`\ndemo: FAILED — ${failed.length} of ${checks.length} check(s) did not hold.`);

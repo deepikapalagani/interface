@@ -34,21 +34,50 @@
  * Replay runs no model, so running it twice costs nothing. Discovery is never
  * invoked from here.
  *
- * Run: npx tsx scripts/verify-determinism.ts [--self-test]
+ * ── THE CHECKER BRINGS ITS OWN MOCK ─────────────────────────────────────────
+ *
+ * It used to hardcode http://localhost:7101/ with no override, which is the
+ * worst failure mode a determinism gate can have: after any change to mock/ it
+ * reported green against whatever OLD code happened to still be listening on
+ * that port, and the greener the result the less it meant. So it now spawns its
+ * own mock from mock/main.ts IN THIS TREE, on an ephemeral port, and kills it in
+ * a `finally`. The gate therefore tests the code in the working copy and needs
+ * nobody to have started anything.
+ *
+ * `--target <url>` opts back into an external server, and the OK line says so in
+ * capitals — a green against a server this checker did not start is a different
+ * claim, and it must not read like the default one.
+ *
+ * `spawnSync` for the REPLAY children stays safe for the reason it always was:
+ * the mock is a separate process, so blocking this event loop cannot stop it
+ * answering. (`scripts/demo.ts` hosts its mock in-process and must therefore use
+ * async `spawn`; the two scripts differ for that measured reason, not by taste.)
+ *
+ * Run: npx tsx scripts/verify-determinism.ts [--self-test] [--target <url>]
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { EventSequencer } from "../src/evidence/events.js";
 
-const TARGET = "http://localhost:7101/";
-const RESET = `${TARGET}__admin/reset`;
-const STATE = `${TARGET}__admin/state`;
+/** An external server to test INSTEAD of spawning one. Null means "bring your own". */
+const externalTarget = (): string | null => {
+  const i = process.argv.indexOf("--target");
+  const value = i >= 0 ? process.argv[i + 1] : undefined;
+  if (value === undefined || value.startsWith("--")) return null;
+  return value.endsWith("/") ? value : `${value}/`;
+};
 
 const CAPABILITY = "tests/fixtures/lookup@1.0.0.json";
+/** The mutating capability — the only one here whose run changes the app's state. */
+const CARD_CAPABILITY = "tests/fixtures/set_status@1.0.0.json";
 const BINDING = "tests/fixtures/fcu@4.2.json";
+
+/** Generous: the child pays `npx tsx` startup before it can bind a port. */
+const MOCK_START_TIMEOUT_MS = 30_000;
 
 /**
  * All three §3.3 result classes, because determinism of the happy path alone
@@ -61,12 +90,40 @@ interface Scenario {
   readonly inputs: readonly string[];
   /** The class this scenario exists to cover. Asserted — see COVERAGE below. */
   readonly expect: "success" | "business_outcome" | "failed";
+  /**
+   * Defaults to CAPABILITY. Present only on a scenario that needs a different
+   * artifact, so the three read-only scenarios below are untouched by its
+   * addition — which is what keeps this change from silently re-baselining the
+   * corpus it is supposed to be checking.
+   */
+  readonly capability?: string;
 }
 
 const SCENARIOS: readonly Scenario[] = [
   { name: "found", inputs: ["member_id=400200101"], expect: "success" },
   { name: "not-found", inputs: ["member_id=400299999"], expect: "business_outcome" },
   { name: "bad-input", inputs: ["member_id=abc"], expect: "failed" },
+  /**
+   * THE FIRST SCENARIO WHOSE RUN CHANGES THE APP.
+   *
+   * Everything above it is read-only, so `preState` and `postState` were two
+   * copies of one constant and `compare()`'s app-state arm could not fail: it
+   * was live code pointed at something that never moved. This run freezes a card
+   * — the card status flips, an APPLIED row is appended, the confirmation
+   * counter advances — so "the run's own effect on the app is reproducible"
+   * becomes a claim with content.
+   *
+   * FREEZE and not LOST_STOLEN deliberately. The capability is `reversible`, the
+   * shipped policy allows `reversible`, and so no human turn can enter the
+   * determinism corpus. An irreversible capability would escalate, and a corpus
+   * containing a person's timing is not a corpus about replay.
+   */
+  {
+    name: "card-freeze",
+    capability: CARD_CAPABILITY,
+    inputs: ["member_id=400200101", "card_last4=4021", "action=FREEZE"],
+    expect: "success",
+  },
 ];
 
 /**
@@ -285,16 +342,16 @@ const text = (url: string, method: "GET" | "POST" = "GET"): Promise<string> =>
     req.end();
   });
 
-const runOnce = async (scenario: Scenario, root: string, runId: string): Promise<Corpus> => {
-  await text(RESET, "POST");
-  const preState = await text(STATE);
+const runOnce = async (scenario: Scenario, root: string, runId: string, target: string): Promise<Corpus> => {
+  await text(`${target}__admin/reset`, "POST");
+  const preState = await text(`${target}__admin/state`);
 
   const args = [
     "tsx",
     "src/replay/main.ts",
-    "--capability", CAPABILITY,
+    "--capability", scenario.capability ?? CAPABILITY,
     "--binding", BINDING,
-    "--target", TARGET,
+    "--target", target,
     "--evidence", root,
     "--run-id", runId,
     ...scenario.inputs.flatMap((i) => ["--input", i]),
@@ -302,7 +359,7 @@ const runOnce = async (scenario: Scenario, root: string, runId: string): Promise
   const proc = spawnSync("npx", args, { encoding: "utf8", timeout: RUN_TIMEOUT_MS });
   if (proc.error) throw new Error(`replay could not be started: ${proc.error.message}`);
 
-  const postState = await text(STATE);
+  const postState = await text(`${target}__admin/state`);
   const dir = path.join(root, runId);
   const files = fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
   const read = (name: string): string | null =>
@@ -397,25 +454,87 @@ const selfTest = (corpus: Corpus): boolean => {
 
 /* --------------------------------------------------------------------- main */
 
-const main = async (): Promise<void> => {
-  const missing = [CAPABILITY, BINDING].filter((f) => !fs.existsSync(f));
-  if (missing.length > 0) {
-    console.error(`verify-determinism: fixture not found: ${missing.join(", ")} (run from the repo root)`);
-    process.exit(1);
-  }
+/** An ephemeral port, obtained by binding one and letting go of it. */
+const freePort = (): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.on("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address !== null ? address.port : 0;
+      probe.close(() => (port === 0 ? reject(new Error("could not obtain an ephemeral port")) : resolve(port)));
+    });
+  });
 
+/**
+ * Start the mock IN THIS TREE and wait for it to answer.
+ *
+ * `detached: true` puts it in its own process group, which is what makes the kill
+ * reliable: `npx` spawns `tsx`, which spawns the server, so signalling the npx
+ * process alone would leave the real listener orphaned holding the port.
+ */
+const startMock = async (port: number, target: string): Promise<ChildProcess> => {
+  const child = spawn("npx", ["tsx", "mock/main.ts", "--tenant", "a", "--port", String(port)], {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+  });
+
+  // Captured but printed only on failure: a mock that starts cleanly should add
+  // nothing to this script's output.
+  let output = "";
+  const collect = (c: Buffer | string): void => {
+    output += String(c);
+  };
+  child.stdout?.on("data", collect);
+  child.stderr?.on("data", collect);
+
+  const deadline = Date.now() + MOCK_START_TIMEOUT_MS;
+  for (;;) {
+    try {
+      await text(`${target}__admin/state`);
+      return child;
+    } catch {
+      /* not up yet */
+    }
+    if (child.exitCode !== null) {
+      throw new Error(`the mock exited ${child.exitCode} before it answered:\n${output}`);
+    }
+    if (Date.now() > deadline) {
+      stopMock(child);
+      throw new Error(`the mock did not answer at ${target} within ${MOCK_START_TIMEOUT_MS}ms:\n${output}`);
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+};
+
+/** Kill the GROUP, not the process. See `startMock`. */
+const stopMock = (child: ChildProcess | null): void => {
+  if (child === null || child.pid === undefined) return;
   try {
-    await text(STATE);
-  } catch (e: unknown) {
-    console.error(`verify-determinism: the mock is not answering at ${TARGET} — ${e instanceof Error ? e.message : String(e)}`);
-    console.error("  start it with `npm run mock`. Skipping would make this check vacuous, so it fails instead.");
-    process.exit(1);
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
   }
+};
 
+/**
+ * Every scenario, twice each. Returns true if anything failed.
+ *
+ * Separated from `main` so the mock can be killed in a `finally`: `process.exit`
+ * does NOT run finally blocks, and this function has several failure exits. With
+ * the exits inline, a failing gate would leave an orphaned server behind on every
+ * failure — which is precisely the "stale server on a fixed port" problem this
+ * change exists to remove.
+ */
+const runAll = async (target: string, external: boolean): Promise<boolean> => {
   const drift = projectionAgreesWithCode();
   if (drift !== null) {
     console.error(`verify-determinism: PROJECTION UNSOUND — ${drift}`);
-    process.exit(1);
+    return true;
   }
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-determinism-"));
@@ -430,8 +549,8 @@ const main = async (): Promise<void> => {
     // default run id is a constant, so a second run into the same directory would
     // silently double the log and be compared against a fresh one.
     console.log(`verify-determinism: [${scenario.name}] reset -> run, reset -> run ...`);
-    const a = await runOnce(scenario, runRoot, "run-a");
-    const b = await runOnce(scenario, runRoot, "run-b");
+    const a = await runOnce(scenario, runRoot, "run-a", target);
+    const b = await runOnce(scenario, runRoot, "run-b", target);
     if (first === null && a.events.length > 0) first = a;
 
     if (a.result === null || b.result === null) {
@@ -490,16 +609,63 @@ const main = async (): Promise<void> => {
 
   if (failed) {
     console.error(`verify-determinism: run directories left at ${root} for inspection.`);
-    process.exit(1);
+    return true;
   }
 
   fs.rmSync(root, { recursive: true, force: true });
 
   console.log(`verify-determinism: OK — ${SCENARIOS.length} scenario(s) each run twice as reset -> run, evidence identical after projection.`);
   for (const line of observed) console.log(line);
+  console.log(
+    external
+      ? `  TARGET: ${target} — EXTERNAL, named with --target. This did NOT test the mock in this working tree.`
+      : `  target: ${target} — a mock this checker spawned from mock/main.ts in this tree, and killed afterwards.`,
+  );
   console.log(`  projected away: events[${VOLATILE_EVENT_FIELDS.join(", ")}] manifest[${VOLATILE_MANIFEST_FIELDS.join(", ")}] result[${VOLATILE_RESULT_FIELDS.join(", ")}]`);
   console.log("  compared in full: capability.json bytes, manifest, event log, result classification, exit code, and the app's own state before and after each run.");
   console.log("  what this does NOT prove: the mock's clock is frozen, so this shows replay adds no nondeterminism of its own — not that it would survive an app with a live clock.");
+  return false;
+};
+
+const main = async (): Promise<void> => {
+  const missing = [CAPABILITY, CARD_CAPABILITY, BINDING].filter((f) => !fs.existsSync(f));
+  if (missing.length > 0) {
+    console.error(`verify-determinism: fixture not found: ${missing.join(", ")} (run from the repo root)`);
+    process.exit(1);
+  }
+
+  const external = externalTarget();
+  let mock: ChildProcess | null = null;
+  let target: string;
+
+  if (external === null) {
+    const port = await freePort();
+    target = `http://localhost:${port}/`;
+    console.log(`verify-determinism: starting a mock from mock/main.ts on port ${port} ...`);
+    mock = await startMock(port, target);
+  } else {
+    target = external;
+    // An external target must actually ANSWER, and failing is the only honest
+    // response: skipping here would make the whole check vacuous.
+    try {
+      await text(`${target}__admin/state`);
+    } catch (e: unknown) {
+      console.error(`verify-determinism: the mock is not answering at ${target} — ${e instanceof Error ? e.message : String(e)}`);
+      console.error("  start it with `npm run mock`, or drop --target and let this checker start its own.");
+      process.exit(1);
+    }
+  }
+
+  let failed = true;
+  try {
+    failed = await runAll(target, external !== null);
+  } finally {
+    // Explicit, because `process.exit` below does not run finally blocks — so
+    // without this every FAILING gate would leave an orphaned server holding a
+    // port, which is the exact condition this change exists to stop.
+    stopMock(mock);
+  }
+  process.exit(failed ? 1 : 0);
 };
 
 main().catch((e: unknown) => {

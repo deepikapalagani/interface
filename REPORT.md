@@ -7,8 +7,8 @@ decision loop. Everything below serves that one sentence.
 `DECISIONS.md` is the long version: every decision recorded as it was made, with the measurement behind
 it, including the ones that turned out wrong.
 
-**Everything claimed below is checkable in one command.** `npm run verify` runs the typecheck, 165 tests
-across 21 files, the no-LLM import walk, the evidence scan, the determinism comparison, and the full
+**Everything claimed below is checkable in one command.** `npm run verify` runs the typecheck, 240 tests
+across 24 files, the no-LLM import walk, the evidence scan, the determinism comparison, and the full
 slice end to end with no API key. Every checker carries a `--self-test`, because a check that cannot fail
 is worse than no check.
 
@@ -89,6 +89,23 @@ of a schema is a mechanism. A mutating step whose postcondition never holds retu
 `remediation: reconcile_required` and `sideEffectRisk: unknown` rather than inviting a retry; that thin
 rule replaced a generic idempotency subsystem.
 
+That rule is now enforced **run-wide rather than per-step**, and finding out why is the most useful thing
+the mutating route surfaced. Three exits — the run-budget timeout, the capability checkpoint, and the two
+non-resolving ends of a human turn — answered "may I retry?" with the constant `retry_safe` / `none`.
+Every one was correct only because the app had no mutating route, so nothing a replay did could commit.
+A constant that is true for an accidental reason becomes a lie the day the reason goes away, and the
+checkpoint was the sharp case: it never consulted risk at all, so a capability that genuinely froze a
+card and then missed its confirmation told the caller to try again. They now key on whether this run
+actually issued a mutating action, and — across a human turn, where automation cannot watch a person's
+hands — on whether the surface moved. `tests/side-effect.test.ts` proves each site **both ways**, because
+a rule that fires on everything is as broken as one that fires on nothing.
+
+"Run-wide" means every exit, and getting there took a second pass: six *more* exits still answered with
+the constant, including the one the flagship itself reaches — `s07` freezes the card, `s08` then fails to
+read the confirmation back, and a step that issues no action was reporting the run as retryable. A step's
+own innocence is real and irrelevant; the caller is asking about the run. Every failure exit now keys on
+the same flag.
+
 `npm run verify:determinism` runs each result class twice as **reset → run vs reset → run**, comparing
 artifact bytes, manifest, event log, result classification, exit code and the app's own state after
 projecting away timestamps and run ids. Eleven planted divergences were each rejected. It fails as
@@ -139,6 +156,14 @@ production code, and `tests/handoff.integration.test.ts` proves it headlessly wi
 that drives the *real* driver — only who supplies the input is simulated, because a stand-in returning a
 canned outcome would prove nothing about control transfer.
 
+**The escalation is now reachable through the shipped policy, not only through a policy file.**
+`msc.card.report_lost@1.0.0` declares an `irreversible` step; the shipped `riskHandling` maps
+irreversible to `confirm`; the gate refuses it with `requires: human`. The artifact cannot route around
+that, and the reason is structural rather than procedural: schema refinement 1 forbids a `secret` input,
+so no capability can carry the supervisor override the app demands for that action. The person is
+required by the shape of the artifact, not by a configuration choice — safety and escalation interlock
+through the front door.
+
 Escalation is kept structurally unreachable from the determinism corpus (the shipped policy carries no
 screen rules) rather than special-cased, so a non-reproducible human never enters a byte-comparison. The
 audit of control itself — every cede, reclaim and expiry — reaches `/evidence/` on the `operator` arm.
@@ -162,9 +187,22 @@ capability unable to say *which* card it acted on — safety that breaks the thi
 live API key, sourced at runtime so the detector cannot go stale, plus four shape patterns. It reports
 offences by label and never prints a value.
 
+**The irreversible path now has something to exercise.** The app's one mutating transaction refuses
+`LOST_STOLEN` without a supervisor override code, and refinement 1 forbids a `secret` input — so
+`msc.card.report_lost@1.0.0` is *structurally* incapable of supplying it. The run escalates, a person
+types it into the live session, and the app attributes the resulting audit row to `HUMAN`. That
+attribution is honest about what it is: the app records the **authority a request carried**, never who
+was at the keyboard, because only a supervisor holds that code.
+
+Redaction is exercised rather than merely configured. The card screen renders the seeded PAN unmasked —
+that is the point of it, and it is why no capability target ever resolves to that cell. Until that screen
+existed the seeded literal reached no screen at all, so the leak scan had nothing it could have caught.
+
 Named gaps rather than discovered ones: `events.jsonl` is not yet redacted; `redactDeep` masks a
-credential-named key only when its value is a string; and because the mock has **no mutating route at
-all**, the irreversible-action path has nothing to exercise.
+credential-named key only when its value is a string; and the third, app-side enforcement point — the
+application refusing a write while a human holds the session — is **not built**. There is now a mutating
+route for such a point to protect, but the mock has no notion of a session or a holder, so it refuses
+nothing on those grounds and this write-up does not claim it does.
 
 ---
 
@@ -175,10 +213,19 @@ strategy. A second classification system beside `DataClass`. A global egress gua
 in committed evidence. All scaling infrastructure — containers, VNC, co-browsing, queues, operator
 routing — which §7 says is not rewarded.
 
-Unbuilt scope, stated plainly: the mock has six of the eight frozen screens and none of the five
-"reachable from anywhere" renders, so the flagship card-status capability is unbuildable against it;
-fault injection (`npm run mock:fault`) does not exist; parameterising a discovered artifact is still
-manual, because deciding which literals are really parameters is a judgement pass, not a mechanical one;
-and the replay CLI writes no evidence if `replay()` itself throws, which needs a vocabulary decision
-first — an unexpected exception is not a citation of anything.
+Unbuilt scope, stated plainly. The mock now has **eight of the eight** frozen screens and **two of the
+five** "reachable from anywhere" renders — the broadcast, delivered as a dialog rather than as a screen,
+and the abend. The other three are not built: SEC0403 denial, SEC0999 session terminated, and the
+validation modal, whose job is served instead by the app's own inline message line, the same shape as
+MSG 0071 and what the capabilities actually assert against. The broadcast's form is a measurement, not a
+shortcut: a screen-shaped interstitial is **unrecoverable by this engine**, because `wait_and_retry` and
+`reload_screen` issue no action and `observe()` sends no request, so the retries burn in milliseconds
+against a screen that cannot change. A dialog is the recoverable condition the engine can actually act
+on.
+
+Also unbuilt, each named rather than discovered: app-side session-aware refusal; `plan.reconcile`, which
+is declarable but has no consumer; `FailureKind "outcome_unknown"`, which has no producer; `events.jsonl`
+redaction; parameterising a discovered artifact, because deciding which literals are really parameters is
+a judgement pass, not a mechanical one; and the replay CLI writes no evidence if `replay()` itself
+throws, which needs a vocabulary decision first — an unexpected exception is not a citation of anything.
 

@@ -12,12 +12,14 @@
  * deterministic" can be checked rather than believed.
  */
 
+export type CardStatus = "ACTIVE" | "FROZEN" | "LOST_STOLEN";
+
 export interface Card {
   readonly last4: string;
   /** Rendered unmasked on the card screen — the redaction target. */
   readonly pan: string;
   readonly product: string;
-  status: "ACTIVE" | "FROZEN" | "LOST_STOLEN";
+  status: CardStatus;
 }
 
 export interface Account {
@@ -37,15 +39,72 @@ export interface Member {
   readonly cards: Card[];
 }
 
+/**
+ * THE FAULTS THIS APP CAN BE TOLD TO EXHIBIT.
+ *
+ * Each one is ARMED EXPLICITLY and fires on a stated condition, then disarms
+ * itself. Nothing here is probabilistic: a lucky replay must never be able to
+ * pass, and a self-disarming fault is also what lets "recover and continue"
+ * terminate rather than loop forever.
+ *
+ * The catalogue lives beside the state it is stored in so `scripts/fault.ts
+ * --list` reads the same list the server enforces, rather than a second copy
+ * that drifts.
+ */
+export type FaultName = "broadcast" | "confirm_submit" | "abend_after_commit";
+
+export interface FaultSpec {
+  readonly name: FaultName;
+  /** The exact condition on which it fires. */
+  readonly fires: string;
+  /** What a run against it is supposed to demonstrate. */
+  readonly proves: string;
+}
+
+export const FAULTS: readonly FaultSpec[] = [
+  {
+    name: "broadcast",
+    fires: "the next CARD SERVICES render; queues a native alert() after load",
+    proves: "a RECOVERABLE condition — the declared dismiss_dialog rule clears it and the run continues",
+  },
+  {
+    name: "confirm_submit",
+    fires: "the next CARD SERVICES render; the card form gains an onsubmit confirm()",
+    proves: "an UNDECLARED dialog blocks the submit — nothing is committed, and the audit trail's silence proves it",
+  },
+  {
+    name: "abend_after_commit",
+    fires: "the next card action that would otherwise succeed; commits, then renders SYS0500",
+    proves: "the dangerous direction — the change LANDED but the automation never saw the confirmation, so the result is reconcile_required rather than a claimed outcome",
+  },
+];
+
+export const isFaultName = (value: string): value is FaultName => FAULTS.some((f) => f.name === value);
+
 export interface MockState {
   readonly members: Record<string, Member>;
   /** Monotonic, seeded — reset restores it, so confirmation numbers repeat exactly. */
   confirmationSeq: number;
   /** Append-only; the automation's evidence is reconciled against this. */
   audit: AuditRow[];
+  /**
+   * The fault currently armed, or null.
+   *
+   * It lives in `MockState` rather than at module scope so `POST /__admin/reset`
+   * clears it: the determinism corpus can then never be polluted by a fault a
+   * previous demo left armed, and a fault demo must arm AFTER its own reset.
+   */
+  armedFault: FaultName | null;
 }
 
 export interface AuditRow {
+  /** 1-based index within THIS state's audit array. Never a request counter:
+   *  srv.seq counted every request including verify-determinism's own
+   *  /__admin/state probes, so a seq-derived field diverges between two
+   *  identical runs by construction. Reset restores this by rebuilding the array. */
+  readonly seq: number;
+  /** Always the frozen VIRTUAL_NOW. Every row therefore shares one timestamp,
+   *  which is exactly why `seq` carries the ordering. */
   readonly at: string;
   readonly actor: "AUTOMATION" | "HUMAN";
   readonly screen: string;
@@ -53,6 +112,8 @@ export interface AuditRow {
   readonly memberId: string | null;
   readonly confirmation: string | null;
   readonly outcome: "APPLIED" | "DENIED";
+  /** Why it was refused, or what changed. The reconcilable fact. */
+  readonly detail: string;
 }
 
 const member = (
@@ -68,6 +129,7 @@ const member = (
 export const freshState = (): MockState => ({
   confirmationSeq: 4400,
   audit: [],
+  armedFault: null,
   members: {
     "400200101": member("400200101", "ABERNATHY, ROSE", "012", "900-55-0101",
       [

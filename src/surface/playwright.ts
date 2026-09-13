@@ -29,21 +29,29 @@
  * The refusal is UNCONDITIONAL while a turn is armed — it does not consult
  * `ctx.actor`. That is the whole point of a second point rather than a second
  * copy of the first. `ctx.actor` is filled from `lease.holder`
- * (executor.ts:241-248), so during a human turn an action the executor issued
+ * (where `runSteps` builds its `ActionContext`), so during a human turn an action the executor issued
  * would arrive self-attributed as `actor: "human"` and a check that trusted the
  * field would wave it straight through.
  *
- * SAID PLAINLY, because the comment this replaces was false: there is no THIRD,
- * app-side point, and there cannot be one against this mock. MEASURED against
- * mock/main.ts — the mock has no notion of a holder, a human or a session; every
- * application route is a pure read; it never returns 403 or 409; its only
- * non-200 is the 404 fallthrough, and `/__admin/reset` is the sole mutating route,
- * already denied to the automation by the allowlist. There is no mutating
- * application route for a third point to protect. What one would add is stated in
- * the write-up rather than mocked up here: an app that refused a mutating request
- * carrying an automation session token while a human turn was open would make the
- * guarantee survive a bug in BOTH of the points above, which is the only version
- * of this claim that is worth anything in a real deployment.
+ * SAID PLAINLY: there is no THIRD, app-side point. The four measurements that
+ * used to justify that sentence have ALL expired, and they are corrected here
+ * rather than quietly dropped, because every one of them offered read-only-ness
+ * as the REASON no third point was possible — so the reason has to be restated
+ * now that the application can change. Measured against mock/main.ts, it used to
+ * say: every application route is a pure read; it never returns 403 or 409; its
+ * only non-200 is the 404 fallthrough; `/__admin/reset` is the sole mutating
+ * route. `POST /screen/card-action` now mutates, so the first and the fourth are
+ * false. A GET on that same path answers 405 rather than acting — deliberately,
+ * so a URL copied out of a log can never re-trigger a state change — which makes
+ * the third false too.
+ *
+ * The conclusion survives on its own terms, which is the point of restating it:
+ * the mock still has no notion of a holder, a human or a session, so it cannot
+ * refuse a write on the grounds that a person is driving, and this class does not
+ * pretend it can. An app that refused a mutating request carrying an automation
+ * session token while a human turn was open would make the guarantee survive a
+ * bug in BOTH of the points above — the only version of this claim worth anything
+ * in a real deployment — and it is NOT built.
  *
  * `src/control/lease.ts` records the same measurement from the other side, so the
  * two halves of the control model agree about what does and does not exist.
@@ -718,9 +726,9 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
    * WHICH FRAME GETS THE BANNER — decided in Node, for the reason
    * DECISIONS.md:74-79 records.
    *
-   * Name then url pattern, mirroring `resolveFrame` (171-195), because a
-   * hardcoded name breaks on tenant B, which renames content/nav to main/sidebar
-   * (mock/tenant.ts:82-83).
+   * Name then url pattern, mirroring `resolveFrame` below, because a hardcoded
+   * name breaks on tenant B, whose `tenantB` config renames content/nav to
+   * main/sidebar (mock/tenant.ts).
    *
    * The fallback is the case worth stating. If the caller named a frame and some
    * frame on the page matches it, every other frame answers null — one banner,

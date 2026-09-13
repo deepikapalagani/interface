@@ -161,6 +161,27 @@ export const runSteps = async (
    */
   let pausedMs = 0;
 
+  /**
+   * HAS THIS RUN ALREADY CHANGED THE TARGET SYSTEM?
+   *
+   * Run-scoped rather than per-step, because the question a caller asks is about
+   * the RUN: "is it safe to invoke this capability again?" A later step that
+   * cannot confirm itself does not make an earlier freeze un-issued.
+   *
+   * Three exits used to answer that question with the constant `none`, and each
+   * was only correct because the target app had no mutating route: nothing a
+   * replay did could commit anything, so "nothing was committed" was true by
+   * construction rather than by reasoning. `POST /screen/card-action` ends that,
+   * and a constant that was true for an accidental reason becomes a lie the day
+   * the reason goes away. Telling a caller `retry_safe` after a card was actually
+   * frozen is an invitation to double-commit — the §3.3 conflation the whole
+   * result contract exists to prevent.
+   *
+   * Set AFTER `surface.act` returns, never before: an action the gate refused
+   * never reached the application, so a refusal must not arm this.
+   */
+  let committed = false;
+
   const outOfTime = (): boolean => now() - startedAt - pausedMs >= budgets.runMs;
 
   const report = (outcome: RunOutcome): RunReport => ({ outcome, stepsCompleted, recoveries, degradations, interventions, outputs });
@@ -216,7 +237,17 @@ export const runSteps = async (
 
   for (const step of capability.plan.steps) {
     if (outOfTime()) {
-      return fail(step.ref, "timeout", `run to complete within ${budgets.runMs}ms`, `exceeded at step ${step.ref}`, "retry_safe", "none");
+      // A deadline that expires BETWEEN steps says nothing about whether the
+      // steps already taken landed. If one of them did, "retry_safe" would tell
+      // the caller to re-run a capability that has already frozen a card.
+      return fail(
+        step.ref,
+        "timeout",
+        `run to complete within ${budgets.runMs}ms`,
+        `exceeded at step ${step.ref}`,
+        committed ? "reconcile_required" : "retry_safe",
+        committed ? "unknown" : "none",
+      );
     }
 
     const used: string[] = [];
@@ -236,6 +267,15 @@ export const runSteps = async (
         if (c.action === "dismiss_dialog" || c.action === "accept_dialog") {
           const action: SurfaceAction = c.action === "accept_dialog" ? { kind: "accept_dialog" } : { kind: "dismiss_dialog" };
           await surface.act(action, { stepRef: step.ref, risk: "read_only", actor: lease.holder, epoch: lease.epoch, url: location, screen });
+          /**
+           * ACCEPTING a dialog can commit; DISMISSING one cancels, which is the
+           * whole reason an unhandled confirm() produces a phantom success. So
+           * only the accept arm arms the flag, and only on a step that could
+           * commit at all. Unreachable under the shipped policy, whose
+           * `allowedActions` omits `accept_dialog` — armed anyway, because a
+           * policy is configuration and this is the engine.
+           */
+          if (c.action === "accept_dialog" && couldHaveCommitted(step)) committed = true;
         }
         continue; // re-evaluate the same step
       }
@@ -245,7 +285,17 @@ export const runSteps = async (
       }
 
       if (c.kind === "hard_failure") {
-        return fail(step.ref, timedOut ? "precondition_failed" : c.failureKind, c.expected, c.observed, "retry_safe", "none");
+        // THIS step never acted — its precondition is what failed. But an EARLIER
+        // step in the same run may already have committed, and the question the
+        // caller asked is about the run, not about this step.
+        return fail(
+          step.ref,
+          timedOut ? "precondition_failed" : c.failureKind,
+          c.expected,
+          c.observed,
+          committed ? "reconcile_required" : "retry_safe",
+          committed ? "unknown" : "none",
+        );
       }
 
       break; // precondition holds
@@ -254,7 +304,17 @@ export const runSteps = async (
     // ---- the action itself ---------------------------------------------------
     const target = step.target ? targets.get(step.target) : undefined;
     if (step.action !== "assert" && step.target && !target) {
-      return fail(step.ref, "target_unresolvable", `symbol ${step.target} declared`, "not present in plan.targets", "do_not_retry", "none");
+      // A plan naming an undeclared symbol is a broken artifact, so `do_not_retry`
+      // holds however the run got here. What does NOT hold is `none`: an earlier
+      // step may have committed before this one was ever reached.
+      return fail(
+        step.ref,
+        "target_unresolvable",
+        `symbol ${step.target} declared`,
+        "not present in plan.targets",
+        "do_not_retry",
+        committed ? "unknown" : "none",
+      );
     }
 
     let resolution: Resolution | null = null;
@@ -263,7 +323,21 @@ export const runSteps = async (
       // A read never acts, so it never builds an action and never passes the gate.
       const value = await surface.read(target);
       if (value === null) {
-        return fail(step.ref, "postcondition_failed", `a readable value at ${step.target}`, "nothing readable", "retry_safe", "none");
+        /**
+         * A read issues no action, so this step committed nothing — but this is
+         * the exit the FLAGSHIP plan reaches. `msc.card.set_status@1.0.0` ends
+         * `s07` click (reversible, commits) then `s08` read (the confirmation
+         * number). A read that yields nothing after s07 has frozen a card is
+         * precisely the moment `retry_safe` / `none` invites a double-commit.
+         */
+        return fail(
+          step.ref,
+          "postcondition_failed",
+          `a readable value at ${step.target}`,
+          "nothing readable",
+          committed ? "reconcile_required" : "retry_safe",
+          committed ? "unknown" : "none",
+        );
       }
       const output = capability.contract.outputs.find((o) => o.producedBy === step.ref);
       if (output) outputs[output.name] = value;
@@ -297,6 +371,10 @@ export const runSteps = async (
 
       try {
         resolution = await surface.act(action, actionCtx);
+        // It passed the gate and reached the application. Whether its
+        // postcondition later holds is a different question from whether it
+        // landed, and only the second one governs "may I retry?".
+        if (couldHaveCommitted(step)) committed = true;
       } catch (e) {
         if (!(e instanceof SurfaceRefused)) throw e;
         const detail = e.detail as { requires?: string; ruleId?: string; effectiveRisk?: string; attempted?: string[] } | undefined;
@@ -308,7 +386,12 @@ export const runSteps = async (
         if (detail?.requires === "human") {
           const effectiveRisk = detail.effectiveRisk ?? step.risk;
           const ruleId = detail.ruleId ?? "risk";
-          const committed = couldHaveCommitted(step);
+          /**
+           * Named for the question rather than for the flag, because a local
+           * called `committed` here would SHADOW the run-scoped one above and
+           * quietly answer a narrower question than the caller asked.
+           */
+          const mustReconcile = committed || couldHaveCommitted(step);
 
           log.emit(
             "escalation.required",
@@ -328,8 +411,10 @@ export const runSteps = async (
               "escalation_timeout",
               `a human to decide a ${effectiveRisk} action at ${step.ref}`,
               `${e.message}; no operator channel is attached to this run, so nobody could take the session`,
-              "retry_safe",
-              "none",
+              // Correct for THIS step — it was refused before it ran — but the run
+              // is the unit of the question, and an earlier step may have landed.
+              committed ? "reconcile_required" : "retry_safe",
+              committed ? "unknown" : "none",
             );
           }
 
@@ -343,8 +428,8 @@ export const runSteps = async (
               escalated.has(step.ref)
                 ? `${step.ref} still requires a human after one handoff`
                 : `the run has already used its ${MAX_ESCALATIONS_PER_RUN} permitted escalation(s)`,
-              committed ? "reconcile_required" : "retry_safe",
-              committed ? "unknown" : "none",
+              mustReconcile ? "reconcile_required" : "retry_safe",
+              mustReconcile ? "unknown" : "none",
             );
           }
 
@@ -405,11 +490,29 @@ export const runSteps = async (
           });
 
           /**
-           * `none` is what AUTOMATION committed, and it is literally true on this
-           * surface: the action was refused before it ran, and the target app has
-           * no mutating route at all. Against an app that had one, this should key
-           * on the observed delta above rather than stay constant.
+           * WHAT A HUMAN TURN MAY HAVE LEFT BEHIND.
+           *
+           * This used to report the constant `none`, justified by the target app
+           * having no mutating route at all — true when it was written, and the
+           * comment said that an app with one should key on the observed delta
+           * instead. `POST /screen/card-action` exists now, so it does.
+           *
+           * `moved` is the honest measurement and it is the ONLY one available:
+           * automation cannot watch a person's hands, and the person was handed
+           * the session precisely because the step was too risky for automation.
+           * A surface that changed across the turn is the evidence that something
+           * happened; `committed` covers a mutating step this run had already
+           * landed before it ever asked for help.
+           *
+           * The two dispositions diverge on remediation because the operator's
+           * intent differs. ABORT keeps `do_not_retry` — a person looked at it
+           * and said stop, and no automatic retry should overrule that — but it
+           * can no longer claim nothing changed. TIMEOUT means nobody came, so
+           * re-invoking is the right move only when the session is demonstrably
+           * untouched; otherwise the truth has to be established first.
            */
+          const disturbed = committed || moved;
+
           if (handoff.outcome.kind === "abort") {
             return fail(
               step.ref,
@@ -417,7 +520,7 @@ export const runSteps = async (
               `${step.ref} to be completed or declined by a person`,
               `operator ${handoff.outcome.operator} took the session and aborted the run`,
               "do_not_retry",
-              "none",
+              disturbed ? "unknown" : "none",
             );
           }
           if (handoff.outcome.kind === "timeout") {
@@ -426,8 +529,8 @@ export const runSteps = async (
               "escalation_timeout",
               `a human to take the live session before the escalation TTL elapsed`,
               "nobody took the session before it expired",
-              "retry_safe",
-              "none",
+              disturbed ? "reconcile_required" : "retry_safe",
+              disturbed ? "unknown" : "none",
             );
           }
 
@@ -442,6 +545,13 @@ export const runSteps = async (
            * the loop because it happens inside this iteration.
            */
           humanPerformed = true;
+          /**
+           * The person was asked to perform, by hand, the very action the policy
+           * refused — so on a mutating step the run must now assume it landed.
+           * Assuming the opposite is the failure this flag exists to prevent:
+           * it would report `retry_safe` on a card a human has just frozen.
+           */
+          if (couldHaveCommitted(step)) committed = true;
           log.emit(
             "step.resumed",
             { as: "artifact_step", capability: capability.contract.id, version: capability.contract.version, stepRef: step.ref },
@@ -459,8 +569,9 @@ export const runSteps = async (
             "an action permitted by policy on a resolvable target",
             e.message,
             "do_not_retry",
-            // Refused before it ran, so nothing was committed regardless of risk.
-            "none",
+            // THIS step was refused before it ran, so its own risk is irrelevant.
+            // An earlier step's is not: the run may already have committed.
+            committed ? "unknown" : "none",
             detail?.attempted,
           );
         }
@@ -497,7 +608,7 @@ export const runSteps = async (
       // A step that may have committed something and then could not confirm it is
       // the dangerous case: the caller must reconcile rather than blindly retry.
       // A read_only step in the same position is simply retryable.
-      const committed = couldHaveCommitted(step);
+      const mustReconcile = committed || couldHaveCommitted(step);
       return fail(
         step.ref,
         // After a human turn this is not "the action did not work" — automation
@@ -506,23 +617,33 @@ export const runSteps = async (
         humanPerformed ? "unresolved_after_handoff" : post.c.failureKind,
         post.c.expected,
         humanPerformed ? `after the human turn, ${post.c.observed}` : post.c.observed,
-        committed ? "reconcile_required" : "retry_safe",
-        committed ? "unknown" : "none",
+        mustReconcile ? "reconcile_required" : "retry_safe",
+        mustReconcile ? "unknown" : "none",
       );
     }
 
     if (post.c.kind === "recoverable") {
-      const committed = couldHaveCommitted(step);
+      const mustReconcile = committed || couldHaveCommitted(step);
       return humanPerformed
         ? fail(
             step.ref,
             "unresolved_after_handoff",
             `${step.ref} to be complete after its human turn`,
             `a recoverable condition is on screen after the human turn: ${post.c.evidence.summary}`,
-            committed ? "reconcile_required" : "retry_safe",
-            committed ? "unknown" : "none",
+            mustReconcile ? "reconcile_required" : "retry_safe",
+            mustReconcile ? "unknown" : "none",
           )
-        : fail(step.ref, "postcondition_failed", post.c.evidence.summary, `a recoverable condition persisted after ${step.ref}`, "retry_safe", "none");
+        : fail(
+            step.ref,
+            "postcondition_failed",
+            post.c.evidence.summary,
+            `a recoverable condition persisted after ${step.ref}`,
+            // The same `mustReconcile` the human arm above uses. This arm is the
+            // one where automation ITSELF issued the action, so if anything in
+            // this run could have committed, it is at least as true here.
+            mustReconcile ? "reconcile_required" : "retry_safe",
+            mustReconcile ? "unknown" : "none",
+          );
     }
 
     stepsCompleted += 1;
@@ -543,13 +664,21 @@ export const runSteps = async (
   const checkpoint = final.evaluations["checkpoint"];
 
   if (final.matched !== "checkpoint" || !checkpoint) {
+    /**
+     * THE MOST DANGEROUS OF THE THREE, and the one that never consulted risk at
+     * all. Every step passed its own postcondition, so a mutating step DID land;
+     * only the capability-level claim failed. Answering `retry_safe` there tells
+     * a calling agent to re-invoke a capability that has already frozen the card
+     * — the double-commit this contract exists to prevent. It was defensible
+     * only while no route could mutate.
+     */
     return fail(
       null,
       "checkpoint_failed",
       checkpoint?.summary ?? "the capability checkpoint",
       `screen ${final.observation.screen ?? "(unknown)"} after ${stepsCompleted} step(s)`,
-      "retry_safe",
-      "none",
+      committed ? "reconcile_required" : "retry_safe",
+      committed ? "unknown" : "none",
     );
   }
 

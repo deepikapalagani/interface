@@ -1,0 +1,298 @@
+{
+  "_comment": "HAND-AUTHORED FIXTURE, not a discovered artifact — and it lives in tests/fixtures rather than capabilities/ for the same reason lookup@1.0.0.json does: nothing here may be mistaken for the output of a real discovery run. Its provenance says no model produced it and verification.replayResult stays 'not_yet_verified' until a replay stamps it. Its job is to drive the one MUTATING flow on this surface, so that §3.4's risk classes, §3.3's three result classes and the app's own audit trail have something real to act on.",
+  "schemaVersion": 1,
+  "contract": {
+    "id": "msc.card.set_status",
+    "version": "1.0.0",
+    "goal": "Set a member's debit card to a reversible status and return the confirmation number.",
+    "purpose": "Card servicing has no API path on this product, so an agent has to drive the screens. This is the flagship flow: search, results, detail, card services, confirmation — the first capability on this surface that changes anything.",
+    "inputs": [
+      {
+        "name": "member_id",
+        "type": "string",
+        "pattern": "^\\d{9}$",
+        "required": true,
+        "sensitivity": "confidential",
+        "description": "Member account base number."
+      },
+      {
+        "name": "card_last4",
+        "type": "string",
+        "pattern": "^\\d{4}$",
+        "required": true,
+        "sensitivity": "confidential",
+        "description": "Last four of the card to act on. Last four rather than the PAN deliberately: it is what the app's own selector takes, and it is the most that may cross this boundary."
+      },
+      {
+        "name": "action",
+        "type": "enum",
+        "enumValues": ["FREEZE", "UNFREEZE"],
+        "required": true,
+        "sensitivity": "public",
+        "description": "The status change to apply. Only the two REVERSIBLE codes are accepted here; LOST_STOLEN is irreversible and lives in its own capability so that the risk of a run is a property of the artifact rather than of an argument."
+      }
+    ],
+    "outputs": [
+      {
+        "name": "confirmation_number",
+        "type": "string",
+        "sensitivity": "confidential",
+        "producedBy": "s08",
+        "description": "The app's own reference for the change. This is the value a caller reconciles against the app's audit trail."
+      }
+    ],
+    "outcomes": [
+      {
+        "code": "MEMBER_NOT_FOUND",
+        "message": "No member matches that id.",
+        "when": {
+          "all": [
+            { "atom": "screen", "is": "MEMBER_RESULTS" },
+            { "atom": "text", "contains": "MSG 0071" }
+          ],
+          "any": []
+        },
+        "source": "app_profile",
+        "note": "Detected at s02, before anything has been typed into a servicing screen. A legitimate answer the caller asked for, not a failure."
+      },
+      {
+        "code": "CARD_NOT_FOUND",
+        "message": "That member holds no card with those last four.",
+        "when": {
+          "all": [
+            { "atom": "screen", "is": "CARD_SERVICES" },
+            { "atom": "text", "contains": "MSG 0114" }
+          ],
+          "any": []
+        },
+        "source": "app_profile",
+        "note": "The app refuses and stays on CRD0500. Nothing was changed, which is why this is an answer rather than a reconcile."
+      },
+      {
+        "code": "CARD_ALREADY_IN_STATE",
+        "message": "That card is already in the requested status.",
+        "when": {
+          "all": [
+            { "atom": "screen", "is": "CARD_SERVICES" },
+            { "atom": "text", "contains": "MSG 0121" }
+          ],
+          "any": []
+        },
+        "source": "app_profile",
+        "note": "The most easily mis-filed of the three: a caller asked for FREEZE and the card is already frozen, so the WORLD IS ALREADY AS REQUESTED. Reporting that as a failure would make an idempotent request look broken."
+      }
+    ],
+    "risk": "reversible",
+    "requiresSession": true
+  },
+  "plan": {
+    "app": "MERIDIAN MSC",
+    "targets": [
+      {
+        "id": "MEMBER_ID",
+        "screen": "MEMBER_SEARCH",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/search$" }],
+        "strategies": [
+          { "kind": "table_anchor", "key": "MEMBER_ID", "matchedAtRecord": 1 },
+          { "kind": "field_key", "key": "MEMBER_ID", "matchedAtRecord": 1 }
+        ],
+        "verify": { "role": "textbox" },
+        "nameMayContainPii": false,
+        "robustness": "Anchored on the visible label cell rather than position: measured to survive both a frame rename and a field rename, where the field name survived neither. The nav frame carries a control with the SAME field name, so the frame hop is load-bearing and not decoration."
+      },
+      {
+        "id": "SUBMIT",
+        "screen": "MEMBER_SEARCH",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/search$" }],
+        "strategies": [{ "kind": "field_key", "key": "SUBMIT", "matchedAtRecord": 1 }],
+        "verify": {},
+        "nameMayContainPii": false,
+        "robustness": "An image submit with an empty alt has no accessible name at all, so the app's own control name is the only stable handle this surface offers. No anchor is possible: its row holds no label cell."
+      },
+      {
+        "id": "OPEN_MEMBER",
+        "screen": "MEMBER_RESULTS",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/results" }],
+        "strategies": [{ "kind": "table_anchor", "key": "OPEN_MEMBER", "matchedAtRecord": 1 }],
+        "verify": { "role": "link" },
+        "nameMayContainPii": false,
+        "robustness": "The results grid has no row keys and no test ids, so the only durable handle on a row is the link in its own trailing ACTION cell. Anchoring on that link's text scopes to data rows by construction: the header cell reads ACTION, not the link text, so the header row cannot match. With two matches the resolver refuses rather than guessing — which is correct here, since which of two members to open is not a decision a recorded plan may make. Deliberately NOT a column index: tenant B prepends a BRANCH column and every index-based read silently shifts."
+      },
+      {
+        "id": "CARD_SERVICES_LINK",
+        "screen": "MEMBER_DETAIL",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/detail" }],
+        "strategies": [{ "kind": "table_anchor", "key": "CARD_SERVICES_LINK", "matchedAtRecord": 1 }],
+        "verify": { "role": "link" },
+        "nameMayContainPii": false,
+        "robustness": "A labelled row whose single control is the link into card services. The nav frame renders the same words, which is exactly why the target is frame-scoped to content: unscoped, this text matches in two places."
+      },
+      {
+        "id": "CARD_SELECT",
+        "screen": "CARD_SERVICES",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/card" }],
+        "strategies": [
+          { "kind": "table_anchor", "key": "CARD_SELECT", "matchedAtRecord": 1 },
+          { "kind": "field_key", "key": "CARD_SELECT", "matchedAtRecord": 1 }
+        ],
+        "verify": { "role": "textbox" },
+        "nameMayContainPii": false,
+        "robustness": "Anchored on its label cell; its row holds exactly one control. The frame's url pattern is the SCREEN-agnostic prefix /screen/card rather than /screen/cards$, because after a refused submit the same screen is rendered from the action route — a pattern keyed on the entry route would miss the retry and fall through to a positional hop."
+      },
+      {
+        "id": "CARD_ACTION",
+        "screen": "CARD_SERVICES",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/card" }],
+        "strategies": [
+          { "kind": "table_anchor", "key": "CARD_ACTION", "matchedAtRecord": 1 },
+          { "kind": "field_key", "key": "CARD_ACTION", "matchedAtRecord": 1 }
+        ],
+        "verify": { "role": "textbox" },
+        "nameMayContainPii": false,
+        "robustness": "Anchored on its label cell. The card grid's header row carries the CARD STATUS label and no control at all, which is why status is a rendered label here and never an anchor key — an anchor that matched a header row would resolve zero controls and degrade to the field name for no reason."
+      },
+      {
+        "id": "CARD_APPLY",
+        "screen": "CARD_SERVICES",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/card" }],
+        "strategies": [{ "kind": "field_key", "key": "CARD_APPLY", "matchedAtRecord": 1 }],
+        "verify": {},
+        "nameMayContainPii": false,
+        "robustness": "The one control on this surface that commits a change, and like every other submit here it is an image input with an empty alt: no accessible name, no label cell in its row. The app's own control name is the only handle, and it is frame-scoped so it cannot collide with a submit on another screen."
+      },
+      {
+        "id": "CONFIRMATION_NUMBER",
+        "screen": "CONFIRMATION",
+        "framePath": [{ "name": "content", "urlPattern": "/screen/card-action$" }],
+        "strategies": [{ "kind": "table_anchor", "key": "CONFIRMATION", "matchedAtRecord": 1 }],
+        "verify": {},
+        "nameMayContainPii": false,
+        "robustness": "Static text, not a control: it is read by anchoring the row on its label cell and taking the NEXT cell, never by column index. Exactly one row on the confirmation screen carries the label, which is what the read path requires — the screen title deliberately does not repeat the word, because a second match makes the value unreadable rather than ambiguous."
+      }
+    ],
+    "steps": [
+      {
+        "ref": "s01",
+        "title": "Enter the member id",
+        "action": "fill",
+        "target": "MEMBER_ID",
+        "value": "{{member_id}}",
+        "pre": { "all": [{ "atom": "screen", "is": "MEMBER_SEARCH" }], "any": [] },
+        "post": { "all": [{ "atom": "valueEquals", "target": "MEMBER_ID", "value": "{{member_id}}" }], "any": [] },
+        "risk": "read_only",
+        "approval": "none"
+      },
+      {
+        "ref": "s02",
+        "title": "Submit the search",
+        "action": "click",
+        "target": "SUBMIT",
+        "pre": { "all": [{ "atom": "screen", "is": "MEMBER_SEARCH" }], "any": [] },
+        "post": { "all": [{ "atom": "screen", "is": "MEMBER_RESULTS" }], "any": [] },
+        "risk": "read_only",
+        "approval": "none"
+      },
+      {
+        "ref": "s03",
+        "title": "Open the matched member",
+        "action": "click",
+        "target": "OPEN_MEMBER",
+        "pre": { "all": [{ "atom": "screen", "is": "MEMBER_RESULTS" }], "any": [] },
+        "post": { "all": [{ "atom": "screen", "is": "MEMBER_DETAIL" }], "any": [] },
+        "risk": "read_only",
+        "approval": "none"
+      },
+      {
+        "ref": "s04",
+        "title": "Open card services for that member",
+        "action": "click",
+        "target": "CARD_SERVICES_LINK",
+        "pre": { "all": [{ "atom": "screen", "is": "MEMBER_DETAIL" }], "any": [] },
+        "post": { "all": [{ "atom": "screen", "is": "CARD_SERVICES" }], "any": [] },
+        "risk": "read_only",
+        "approval": "none"
+      },
+      {
+        "ref": "s05",
+        "title": "Select the card by its last four",
+        "action": "fill",
+        "target": "CARD_SELECT",
+        "value": "{{card_last4}}",
+        "pre": { "all": [{ "atom": "screen", "is": "CARD_SERVICES" }], "any": [] },
+        "post": { "all": [{ "atom": "valueEquals", "target": "CARD_SELECT", "value": "{{card_last4}}" }], "any": [] },
+        "risk": "read_only",
+        "approval": "none"
+      },
+      {
+        "ref": "s06",
+        "title": "Enter the status change to apply",
+        "action": "fill",
+        "target": "CARD_ACTION",
+        "value": "{{action}}",
+        "pre": { "all": [{ "atom": "screen", "is": "CARD_SERVICES" }], "any": [] },
+        "post": { "all": [{ "atom": "valueEquals", "target": "CARD_ACTION", "value": "{{action}}" }], "any": [] },
+        "risk": "read_only",
+        "approval": "none"
+      },
+      {
+        "ref": "s07",
+        "title": "Apply the status change",
+        "action": "click",
+        "target": "CARD_APPLY",
+        "pre": { "all": [{ "atom": "screen", "is": "CARD_SERVICES" }], "any": [] },
+        "post": {
+          "all": [
+            { "atom": "screen", "is": "CONFIRMATION" },
+            { "atom": "text", "contains": "{{card_last4}}" }
+          ],
+          "any": []
+        },
+        "risk": "reversible",
+        "approval": "confirm_intent"
+      },
+      {
+        "ref": "s08",
+        "title": "Read the confirmation number",
+        "action": "read",
+        "target": "CONFIRMATION_NUMBER",
+        "pre": { "all": [{ "atom": "screen", "is": "CONFIRMATION" }], "any": [] },
+        "post": {
+          "all": [
+            { "atom": "screen", "is": "CONFIRMATION" },
+            { "atom": "text", "contains": "{{card_last4}}" }
+          ],
+          "any": []
+        },
+        "risk": "read_only",
+        "approval": "none"
+      }
+    ],
+    "recovery": [
+      {
+        "id": "dismiss-broadcast",
+        "when": { "atom": "dialog", "messageContains": "SYSTEM BROADCAST" },
+        "do": "dismiss_dialog",
+        "maxAttempts": 2,
+        "note": "A known operations broadcast that can arrive on any screen. Dismissing it changes no member state, which is the whole test for whether a response belongs in this table: a recovery that could commit something is not a recovery."
+      }
+    ],
+    "checkpoint": {
+      "all": [
+        { "atom": "screen", "is": "CONFIRMATION" },
+        { "atom": "text", "contains": "{{card_last4}}" },
+        { "atom": "text", "contains": "{{action}}" }
+      ],
+      "any": []
+    }
+  },
+  "provenance": {
+    "discoveredAt": "2026-09-12T00:00:00Z",
+    "model": "none - hand-authored fixture, no model produced this",
+    "traceDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "appProfileVersion": "meridian-msc@4.2",
+    "modelAuthoredFields": []
+  },
+  "verification": {
+    "replayResult": "not_yet_verified"
+  }
+}

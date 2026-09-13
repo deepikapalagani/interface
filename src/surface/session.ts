@@ -9,12 +9,14 @@
  * ── WHY THIS IS NOT PART OF `Surface` ───────────────────────────────────────
  *
  * MEASURED, not assumed (`grep -rn 'implements Surface' src tests`): `Surface`
- * has NINE implementers — three real (`PlaywrightSurface`, `BoundSurface`,
- * `GatedSurface`) and six test stubs (tests/gate.test.ts:21, predicate.test.ts:39,
- * classify.test.ts:26, discover-executor.test.ts:55, outcome-signal.test.ts:126,
- * discover-loop.test.ts:71). Widening `Surface` would force all six of those
- * unrelated files to grow dead methods they would never call, and would put a
- * human-turn API on the interface a desktop or 5250 adapter has to implement.
+ * has ELEVEN implementers — three real (`PlaywrightSurface`, `BoundSurface`,
+ * `GatedSurface`) and eight test stubs (in tests/gate, predicate, classify,
+ * discover-executor, discover-loop, outcome-signal, handoff and side-effect).
+ * The count is deliberately re-measured rather than cited by line, because it
+ * only ever grows: every new suite that drives the executor writes another stub.
+ * Widening `Surface` would force all eight of those unrelated files to grow dead
+ * methods they would never call, and would put a human-turn API on the interface
+ * a desktop or 5250 adapter has to implement.
  *
  * Nothing that consumes `Surface` needs any of this. The executor drives steps;
  * the gate enforces policy; neither has a reason to paint a banner. Exactly one
@@ -64,8 +66,8 @@ export type HandbackSignal =
  * where `frame.name()` and `frame.url()` are already known.
  *
  * Both fields are optional and tried in the order `resolveFrame` already uses —
- * name, then url pattern — because a hardcoded name breaks on tenant B, which
- * renames `content`/`nav` to `main`/`sidebar` (mock/tenant.ts:82-83).
+ * name, then url pattern — because a hardcoded name breaks on tenant B, whose
+ * `tenantB` config renames `content`/`nav` to `main`/`sidebar` (mock/tenant.ts).
  */
 export interface NoticeTarget {
   readonly frameName?: string;
@@ -133,7 +135,7 @@ export interface HandbackChannel {
  * more than it is: a real human does not call this. A real human clicks in the
  * headed browser, and the automation cannot observe that at all — which is
  * exactly why `EscalationRecord.reconstructedActions` is named the way it is
- * (contract/result.ts:118-123).
+ * (`EscalationRecord.reconstructedActions` in contract/result.ts).
  *
  * It exists so the control transfer can be proven in CI with no person present.
  * The alternative — a "human" that returns a canned outcome without touching the
