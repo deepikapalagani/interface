@@ -1,5 +1,7 @@
 # Meridian capability runner
 
+https://github.com/deepikapalagani/interface/issues/1#issue-5442784540
+
 An LLM drives a legacy back-office UI once to accomplish a goal. That run is recorded as a typed,
 versioned **capability artifact**. After that the flow replays **deterministically, with no LLM in the
 decision loop** — which is how a production agent would invoke it.
