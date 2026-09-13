@@ -40,6 +40,111 @@ const provider = (fetchImpl: typeof fetch, over: Partial<OpenAICompatConfig> = {
     ...over,
   });
 
+/**
+ * THE WIRE PAIRING RULE — every declared tool call must be answered.
+ *
+ * The loop executes exactly ONE call per turn on purpose: a second call's `ref`
+ * was chosen from the observation taken before the first action ran, and acting on
+ * a stale ref could hit a different control on a screen rated irreversible. But the
+ * assistant turn's opaque `raw` still declares every call the model made, and
+ * `toWire` replays it verbatim — so a batched turn put an unanswered id on the wire.
+ *
+ * Measured against an endpoint applying the real rule: HTTP 400, "The following
+ * tool_call_ids did not have response messages: call_B", which this adapter treats
+ * as terminal. The run died, and because `discover/main.ts` writes `trace.jsonl`
+ * and `transcript.jsonl` only after `runDiscovery` returns, it took the evidence of
+ * the genuine run with it.
+ */
+describe("reconciling tool calls before they reach the wire", () => {
+  const sent = (fetchImpl: typeof fetch) => fetchImpl;
+
+  /** An assistant turn that declared two calls, of which the loop answered one. */
+  const batched = [
+    { role: "user" as const, content: "GOAL: look up a member" },
+    {
+      role: "assistant" as const,
+      content: "",
+      toolCalls: [
+        { id: "call_A", name: "type_text", args: {} },
+        { id: "call_B", name: "click", args: {} },
+      ],
+      raw: {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_A", type: "function", function: { name: "type_text", arguments: "{}" } },
+          { id: "call_B", type: "function", function: { name: "click", arguments: "{}" } },
+        ],
+      },
+    },
+    { role: "tool" as const, callId: "call_A", content: "SCREEN: MEMBER_SEARCH" },
+  ];
+
+  const captureBody = (): { readonly seen: Record<string, unknown>[]; readonly impl: typeof fetch } => {
+    const seen: Record<string, unknown>[] = [];
+    const impl: typeof fetch = async (_url, init) => {
+      seen.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return ok();
+    };
+    return { seen, impl };
+  };
+
+  type WireMsg = { role: string; tool_calls?: { id: string }[]; tool_call_id?: string };
+
+  it("drops a declared call that nothing answered, instead of letting the endpoint 400", async () => {
+    const { seen, impl } = captureBody();
+    await provider(sent(impl)).converse(batched, OPTS);
+
+    const messages = seen[0]?.["messages"] as WireMsg[];
+    const assistant = messages.find((m) => m.role === "assistant");
+    const declared = (assistant?.tool_calls ?? []).map((c) => c.id);
+    const answered = messages.filter((m) => m.role === "tool").map((m) => m.tool_call_id);
+
+    // The invariant, asserted directly rather than via a status code: nothing is
+    // declared on the wire that no tool message answers.
+    expect(declared).toEqual(["call_A"]);
+    expect(declared.every((id) => answered.includes(id))).toBe(true);
+  });
+
+  it("leaves an ordinary single-call turn byte-identical", async () => {
+    const { seen, impl } = captureBody();
+    const single = [
+      batched[0]!,
+      {
+        role: "assistant" as const,
+        content: "",
+        toolCalls: [{ id: "call_A", name: "type_text", args: {} }],
+        raw: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "call_A", type: "function", function: { name: "type_text", arguments: "{}" } }],
+        },
+      },
+      batched[2]!,
+    ];
+    await provider(sent(impl)).converse(single, OPTS);
+
+    // This runs on every request the adapter makes, so "changed nothing when
+    // nothing was orphaned" matters as much as the drop itself.
+    const messages = seen[0]?.["messages"] as WireMsg[];
+    const assistant = messages.find((m) => m.role === "assistant");
+    expect(assistant?.tool_calls).toEqual([
+      { id: "call_A", type: "function", function: { name: "type_text", arguments: "{}" } },
+    ]);
+  });
+
+  it("does not mutate the caller's history, which is replayed on every later turn", async () => {
+    const { impl } = captureBody();
+    await provider(sent(impl)).converse(batched, OPTS);
+
+    // `raw` is the provider's own object, held in the loop's history and written
+    // verbatim into transcript.jsonl. A mutating reconcile would make the drop
+    // permanent and invisible, and would silently rewrite the recorded evidence.
+    const raw = batched[1]?.raw as { tool_calls: { id: string }[] };
+    expect(raw.tool_calls.map((c) => c.id)).toEqual(["call_A", "call_B"]);
+  });
+});
+
 describe("retrying what actually fails", () => {
   it("retries a 429 and reports EVERY HTTP attempt in its call count", async () => {
     let calls = 0;

@@ -252,6 +252,32 @@ export const STEP_ACTION: Readonly<Record<string, "fill" | "click" | "read">> = 
 export const isStepEntry = (entry: TraceEntry): boolean =>
   entry.target !== undefined && STEP_ACTION[entry.tool] !== undefined;
 
+/**
+ * WHICH TOOLS ARE EXPECTED TO MOVE THE SCREEN — the dead-end detector's input.
+ *
+ * Deliberately NOT the same set as `STEP_ACTION`. The detector's verdict says the
+ * model acted and the application did not respond, and that sentence is only true
+ * for a tool whose action should have changed what is on screen.
+ *
+ * MEASURED 2026-09-13, twice. A `read` issues no surface action at all — a probe
+ * driving the real loop recorded `surface.act() calls issued: 0` while the run
+ * stopped with "the model is acting, the application is not responding". And a
+ * `fill` cannot move the digest even when it lands: `digestOf(screenId|nodes.length
+ * |innerText)` is built from `innerText`, which does not carry input VALUES, so
+ * against a live mock two successive real fills left the digest byte-identical at
+ * `7be0a02d` while a subsequent `read` of the same field returned the value that
+ * had been typed. Feeding either to the detector aborted any capability that
+ * extracted more than three values from one screen — which §3.2 requires — and
+ * blamed the application for it.
+ *
+ * `dialog` stays in: dismissing an interstitial genuinely should change the screen,
+ * and a dialog that will not clear is a real dead end.
+ */
+export const MOVES_SCREEN: Readonly<Record<string, true>> = {
+  click: true,
+  dialog: true,
+};
+
 export const stepRefOf = (nth: number): string => `s${String(nth).padStart(2, "0")}`;
 
 /**

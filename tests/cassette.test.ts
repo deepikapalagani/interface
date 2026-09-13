@@ -125,6 +125,79 @@ describe("cassette", () => {
   });
 
   /**
+   * A RECORDING WHERE THE MODEL CALLED NOTHING — the shape that skewed the pairing.
+   *
+   * Every fixture above alternates assistant/tool strictly, and so does every
+   * committed transcript, which is the only reason this never showed. The loop
+   * answers a no-tool-call turn with a **user** note rather than a tool result, so
+   * a recording containing one has more assistant turns than tool turns, and the
+   * old positional pairing compared every later turn against the NEXT turn's
+   * screen.
+   *
+   * The fixture straddles a screen transition (MEMBER_SEARCH -> MEMBER_RESULTS)
+   * deliberately: on a fixture that stays on one screen the skew compares
+   * MEMBER_SEARCH against MEMBER_SEARCH and passes on both implementations, which
+   * would make this whole block decorative.
+   */
+  const skipped: Turn[] = [
+    { role: "system", content: "system" },
+    { role: "user", content: "GOAL: look up a member\n\nSCREEN: MEMBER_SEARCH" },
+    { role: "assistant", content: "", toolCalls: [call("c1", "type_text")], raw: { role: "assistant" } },
+    { role: "tool", callId: "c1", content: "(type_text ok) MEMBER_SEARCH — 4 control(s)" },
+    // The model spent its budget thinking and called nothing. `discover/loop.ts`
+    // replies with a USER note — there is no tool result to pair with this turn.
+    { role: "assistant", content: "thinking...", toolCalls: [], raw: { role: "assistant" } },
+    { role: "user", content: "you must act by calling exactly one tool" },
+    { role: "assistant", content: "", toolCalls: [call("c2", "click")], raw: { role: "assistant" } },
+    { role: "tool", callId: "c2", content: "(click ok) MEMBER_RESULTS — 1 control(s)" },
+    { role: "assistant", content: "", toolCalls: [call("c3", "finish")], raw: { role: "assistant" } },
+  ];
+
+  it("does not accuse a faithful replay of drift after a turn that called nothing", async () => {
+    const c = new CassetteProvider(skipped);
+    await c.converse([{ role: "user", content: "start" }], OPTS);
+
+    // The live history's newest tool turn is still c1's, because the empty turn
+    // produced no result. Re-reading it as if it answered the empty turn is
+    // exactly what threw CassetteDiverged(turn=2, "MEMBER_RESULTS", "MEMBER_SEARCH")
+    // on a run that had not drifted at all.
+    const history: Turn[] = [{ role: "tool", callId: "c1", content: "SCREEN: MEMBER_SEARCH\nCONTROLS (4):" }];
+
+    const empty = await c.converse(history, OPTS);
+    expect(empty.toolCalls).toHaveLength(0);
+
+    const third = await c.converse(history, OPTS);
+    expect(third.toolCalls[0]?.name).toBe("click");
+  });
+
+  it("still refuses a genuine drift after that turn, and names the right one", async () => {
+    const c = new CassetteProvider(skipped);
+    await c.converse([{ role: "user", content: "start" }], OPTS);
+    const history: Turn[] = [{ role: "tool", callId: "c1", content: "SCREEN: MEMBER_SEARCH\nCONTROLS (4):" }];
+    await c.converse(history, OPTS);
+    await c.converse(history, OPTS);
+
+    /**
+     * The IDENTITY of the divergence is the assertion, not merely its type.
+     *
+     * A bare `rejects.toBeInstanceOf` would pass on the old code too — it throws
+     * as well, just one call earlier and about the wrong turn. Pinning the triple
+     * is what distinguishes "refused the drift it was shown" from "refused
+     * something else for the wrong reason", and it keeps this from being a
+     * duplicate of the FAILS LOUDLY test above.
+     */
+    try {
+      await c.converse([{ role: "tool", callId: "c2", content: "SCREEN: SEC0403\nCONTROLS (0):" }], OPTS);
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      const diverged = e as CassetteDiverged;
+      expect(diverged.turn).toBe(3);
+      expect(diverged.expected).toBe("MEMBER_RESULTS");
+      expect(diverged.actual).toBe("SEC0403");
+    }
+  });
+
+  /**
    * THE SCOPE OF THE GUARD, PINNED SO THE HEADER CANNOT OVERSTATE IT AGAIN.
    *
    * The module header used to say each turn asserts "the tool result being handed

@@ -104,6 +104,56 @@ const toWire = (turn: Turn): WireMessage => {
   }
 };
 
+/**
+ * DROP DECLARED TOOL CALLS THAT NOTHING ANSWERED — the wire rule, enforced at the
+ * one place allowed to interpret `raw`.
+ *
+ * The protocol requires every `tool_calls` entry on an assistant message to be
+ * answered by a `tool` message carrying the same id. The loop executes exactly one
+ * call per turn on purpose (a second call's `ref` came from the observation BEFORE
+ * the first action ran, and acting on a stale ref could click a different control
+ * on a screen rated irreversible). But the assistant turn's opaque `raw` still
+ * DECLARES every call the model made, and `toWire` replays it verbatim — so a
+ * batched turn put an unanswered id on the wire.
+ *
+ * MEASURED against an endpoint applying the real rule: HTTP 400, "The following
+ * tool_call_ids did not have response messages: call_B". `post()` treats 400 as
+ * terminal, so the run died — and `discover/main.ts` writes `trace.jsonl` and
+ * `transcript.jsonl` only after `runDiscovery` RETURNS, so the throw destroyed the
+ * evidence of the one run the brief requires to be genuine.
+ *
+ * Fixed HERE rather than in the loop, deliberately. Answering the extra calls with
+ * synthetic tool results would also make the wire valid, but it changes the shape
+ * of the recorded history — and `CassetteProvider` pairs one tool turn to one
+ * assistant turn, so the offline replay would then diverge against its own
+ * recording. Measured: `cassette diverged at turn 1: the recorded run saw "NOT RUN:
+ * you called more than one tool i…"`. Reconciling on the way out keeps the history,
+ * the transcript and the cassette exactly as they were; the loop separately records
+ * the dropped calls in `errors` and a `model.extra_tool_calls` event, so nothing
+ * disappears silently.
+ *
+ * The `raw` object belongs to the caller's history and is replayed on every later
+ * turn, so this copies rather than mutates — a mutation would make the drop
+ * permanent and invisible.
+ */
+const reconcileToolCalls = (messages: readonly WireMessage[]): WireMessage[] => {
+  const answered = new Set<string>();
+  for (const m of messages) {
+    if (m.role === "tool" && m.tool_call_id !== undefined) answered.add(m.tool_call_id);
+  }
+
+  return messages.map((m) => {
+    if (m.role !== "assistant" || m.tool_calls === undefined) return m;
+    const kept = m.tool_calls.filter((c) => answered.has(c.id));
+    if (kept.length === m.tool_calls.length) return m;
+
+    const copy: WireMessage = { ...m };
+    if (kept.length > 0) copy.tool_calls = kept;
+    else delete copy.tool_calls;
+    return copy;
+  });
+};
+
 /** What one attempt produced: a usable body, or a reason to try again. */
 type Attempt =
   | { readonly ok: true; readonly body: Record<string, unknown> }
@@ -210,7 +260,9 @@ export class OpenAICompatProvider implements ModelProvider {
 
   async converse(history: readonly Turn[], options: ConverseOptions): Promise<ConverseResponse> {
     const payload: Record<string, unknown> = {
-      messages: history.map(toWire),
+      // Reconciled, never raw: an assistant turn may declare more calls than the
+      // loop answered, and an unanswered id is a 400 this adapter does not retry.
+      messages: reconcileToolCalls(history.map(toWire)),
       max_tokens: options.maxTokens,
     };
 

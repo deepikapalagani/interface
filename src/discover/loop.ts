@@ -23,7 +23,7 @@ import type { EventSequencer } from "../evidence/events.js";
 import type { ModelProvider, Turn } from "../model/provider.js";
 import { observationSummary, observationToText } from "../surface/serialize.js";
 import type { Surface } from "../surface/types.js";
-import { execute, isStepEntry, stepRefOf, type TraceEntry } from "./executor.js";
+import { execute, isStepEntry, MOVES_SCREEN, stepRefOf, type TraceEntry } from "./executor.js";
 import { StopController, type StopLimits, type StopReason } from "./stops.js";
 import { TOOL_SPECS } from "./tools.js";
 
@@ -153,7 +153,7 @@ export const runDiscovery = async (goal: string, deps: DiscoveryDeps): Promise<D
 
     history.push({ role: "assistant", content: response.text, toolCalls: response.toolCalls, raw: response.raw });
 
-    const call = response.toolCalls[0];
+    const [call, ...extra] = response.toolCalls;
     if (!call) {
       // A reasoning model that spends its whole budget thinking returns empty —
       // which looks like refusal and is really truncation. Say so plainly.
@@ -175,6 +175,51 @@ export const runDiscovery = async (goal: string, deps: DiscoveryDeps): Promise<D
         break;
       }
       continue;
+    }
+
+    /**
+     * THE MODEL BATCHED SEVERAL CALLS INTO ONE TURN. Exactly one runs, and the
+     * rest are RECORDED rather than silently dropped.
+     *
+     * One action per turn is deliberate and not a limitation to route around. The
+     * second call's `ref` was chosen from the observation taken BEFORE the first
+     * action ran, and refs are only valid for the latest observation — so
+     * executing it would act on a control chosen from a stale snapshot, on a
+     * screen that may now rate `irreversible`. It would also make actions-per-turn
+     * a property of the endpoint's batching config, and the trace is the sole
+     * input to the compiler.
+     *
+     * What was wrong was the SILENCE. The discarded call still sits in the
+     * assistant turn's opaque `raw`, which the adapter replays verbatim, so the
+     * next request declared a `tool_call` nothing answered. Measured against an
+     * endpoint applying the real rule: HTTP 400, "The following tool_call_ids did
+     * not have response messages: call_B" — and `post()` does not retry a 400, so
+     * the run died. Worse, `discover/main.ts` writes `trace.jsonl` and
+     * `transcript.jsonl` AFTER `runDiscovery` returns, so the throw destroyed the
+     * evidence of the one run the brief requires to be genuine.
+     *
+     * The wire is made valid in the ADAPTER, which reconciles declared calls
+     * against answered ones before POSTing. That keeps this history — and so the
+     * recorded transcript the cassette replays — exactly the shape it has always
+     * been. Answering the extras with synthetic tool turns would have fixed the
+     * wire and re-broken the cassette, whose pairing assumes one tool turn per
+     * assistant turn; both were measured.
+     *
+     * Not routed through `recordToolError`: the executed call SUCCEEDS and clears
+     * the error streak anyway, and ending a healthy run over a provider-side
+     * batching quirk would be the wrong stop.
+     */
+    if (extra.length > 0) {
+      const skipped = extra
+        .map((x, i) => `call ${i + 2} of ${response.toolCalls.length} (${x.name})`)
+        .join(", ");
+      const note = `the model called ${response.toolCalls.length} tools in one turn; only call 1 (${call.name}) ran — ${skipped} did not`;
+      errors.push(note);
+      log?.emit(
+        "model.extra_tool_calls",
+        { as: "model_decision", stated: statedReason(call.args), model: provider.id, turn: stops.stepCount },
+        { observed: note },
+      );
     }
 
     /**
@@ -249,19 +294,38 @@ export const runDiscovery = async (goal: string, deps: DiscoveryDeps): Promise<D
         record(observationSummary(outcome.observation), isStepEntry(outcome.entry) ? stepRef : undefined);
 
         /**
-         * Only an ACTING turn feeds the dead-end detector, because its verdict
-         * says the application did not respond to an action. Every successful
-         * tool used to feed it, so four consecutive `observe` calls ended a run
-         * with a detail asserting the model was acting when it had issued nothing
-         * at all. Consecutive perception turns are now bounded by the step
-         * ceiling, which is the limit that actually describes them.
+         * Only a SCREEN-CHANGING turn feeds the dead-end detector, because its
+         * verdict says the application did not respond to an action.
+         *
+         * This gated on the outcome KIND until it was measured, and `acted` covers
+         * four tools rather than the two that move a screen. So four consecutive
+         * reads — a model extracting five values from one servicing screen, which
+         * §3.2 asks for — ended the run as `no_progress`, reporting that the model
+         * was acting when a `read` issues no surface action whatsoever. Four fills
+         * on one form did the same: the digest is built from `innerText`, which
+         * does not carry input values, so a fill that lands is byte-identical to
+         * one that does nothing.
+         *
+         * An earlier version of this comment made the same claim one level up
+         * ("only an ACTING turn feeds it") and was already false when written; the
+         * rule now lives in `MOVES_SCREEN` beside `STEP_ACTION`, where the tool
+         * list it describes actually is.
+         *
+         * WHAT THIS GIVES UP, stated plainly: a model that only ever reads or
+         * fills is no longer stopped after four turns. A pathological read loop now
+         * runs to the 40-step ceiling instead — roughly ten times the turns, still
+         * bounded by `maxSteps`, `maxSeconds` and `maxTokens`. That is the right
+         * trade only because the alternative aborts correct runs, but it is a real
+         * cost on a project whose standing constraint is that a run costs nothing.
          */
-        const progress = stops.recordObservation(outcome.observation.digest);
-        if (progress.stop && progress.reason) {
-          history.push({ role: "tool", callId: call.id, content: resultText });
-          stopped = progress.reason;
-          detail = progress.detail;
-          break;
+        if (MOVES_SCREEN[outcome.entry.tool] !== undefined) {
+          const progress = stops.recordObservation(outcome.observation.digest);
+          if (progress.stop && progress.reason) {
+            history.push({ role: "tool", callId: call.id, content: resultText });
+            stopped = progress.reason;
+            detail = progress.detail;
+            break;
+          }
         }
       } else {
         record(observationSummary(outcome.observation));

@@ -72,13 +72,49 @@ export class CassetteProvider implements ModelProvider {
 
   /** The assistant turns from a recorded transcript, in order. */
   private readonly assistant: Extract<Turn, { role: "assistant" }>[];
-  /** The tool results that followed them, for the divergence check. */
-  private readonly recordedResults: string[];
+  /**
+   * The tool result that followed each assistant turn, INDEXED BY ASSISTANT
+   * ORDINAL — `undefined` where that turn called nothing.
+   *
+   * MEASURED 2026-09-13. This used to be a second independent filter
+   * (`transcript.filter(t => t.role === "tool")`), paired with `assistant` by
+   * position at the lookup below. That holds only while every assistant turn is
+   * followed by exactly one `tool` turn, and the loop breaks that alternation on
+   * purpose: when the model calls nothing, `discover/loop.ts` answers with a
+   * **user** note, not a tool result. One such turn shifted every later pairing by
+   * one, so a faithful replay was accused of drift —
+   * `CassetteDiverged(turn=2, expected="MEMBER_RESULTS", actual="MEMBER_SEARCH")`
+   * against a surface that had not moved at all. The mirror case is worse: after
+   * the shift, a REAL drift is compared against the wrong recorded screen and can
+   * pass in silence.
+   *
+   * It is not a hypothetical shape. `model/provider.ts` records as measured that a
+   * reasoning model spends its output budget thinking and returns an empty reply,
+   * and the full history — user notes included — is what gets written to
+   * `transcript.jsonl` and read straight back into this cassette. So the first
+   * real discovery run with one truncated turn would have poisoned its own offline
+   * replay. The committed transcripts are strictly alternating, which is the only
+   * reason `demo:offline` never showed it.
+   *
+   * Pairing is now structural: one ordered walk, each assistant turn carrying the
+   * turn that follows it only when that turn is a `tool` turn. No comparison
+   * coverage is lost — every recorded tool result is still compared exactly once,
+   * and the skipped slot is one where the recording holds nothing to compare.
+   */
+  private readonly recordedResults: (string | undefined)[];
 
   constructor(transcript: readonly Turn[], label = "cassette") {
     this.id = label;
-    this.assistant = transcript.filter((t): t is Extract<Turn, { role: "assistant" }> => t.role === "assistant");
-    this.recordedResults = transcript.filter((t) => t.role === "tool").map((t) => (t.role === "tool" ? t.content : ""));
+    const assistant: Extract<Turn, { role: "assistant" }>[] = [];
+    const results: (string | undefined)[] = [];
+    transcript.forEach((turn, i) => {
+      if (turn.role !== "assistant") return;
+      assistant.push(turn);
+      const next = transcript[i + 1];
+      results.push(next?.role === "tool" ? next.content : undefined);
+    });
+    this.assistant = assistant;
+    this.recordedResults = results;
   }
 
   async converse(history: readonly Turn[], _options: ConverseOptions): Promise<ConverseResponse> {

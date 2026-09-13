@@ -1111,6 +1111,41 @@ each is measured by a reviewer, and each was judged too large or too risky for a
 - **The cassette pairs assistant turns to tool results positionally**, so a recorded turn with no tool call
   skews every later comparison and raises a FALSE divergence, accusing the app of drift it does not have.
   The committed transcripts happen to be clean, so `demo:offline` is unaffected today.
+
+> **All three FIXED, 2026-09-13, and the list above is left standing because the paragraph introducing it
+> sells it as a complete and honest inventory — deleting entries would quietly rewrite what was claimed.**
+> Each was investigated and then adversarially re-checked by a second reviewer, and every one of the three
+> verdicts came back "apply with changes" rather than "apply as proposed", which is the argument for the
+> second pass.
+>
+> **The dead-end detector** now feeds from `MOVES_SCREEN` (`click`, `dialog`) rather than from the outcome
+> kind. Measured both ways: five reads on one unchanged screen stopped at `no_progress` with
+> `surface.act()` called ZERO times while the verdict said "the model is acting"; after the fix the same
+> script completes with all five values captured. What it gives up, stated because the reviewer caught the
+> original write-up softening it: a model looping only reads or fills now runs to the 40-step ceiling
+> instead of stopping at four — roughly ten times the turns, still bounded by `maxSteps`, `maxSeconds` and
+> `maxTokens`.
+>
+> **The orphaned tool call** is fixed in the ADAPTER, not the loop, and the reason is the interesting part.
+> The proposed fix — answer the extra calls with synthetic "NOT RUN" tool results — is wire-valid, and it
+> would have re-broken the cassette fixed in the same pass: it puts two tool turns under one assistant
+> turn, and the cassette pairs one to one. Measured: `cassette diverged at turn 1: the recorded run saw
+> "NOT RUN: you called more than one tool i…"`. Two fixes that each work alone and break together.
+> `reconcileToolCalls` drops declared-but-unanswered calls on the way out instead, so the history, the
+> transcript and the cassette keep exactly the shape they had; the loop separately records the dropped
+> calls in `errors` and a `model.extra_tool_calls` event, so nothing disappears in silence.
+>
+> **The cassette skew** is now structural: one ordered walk pairing each assistant turn with the turn that
+> follows it, only when that turn is a `tool` turn. No comparison coverage is lost — every recorded result
+> is still compared exactly once — and the earlier draft's hedge that drift would be "noticed one turn
+> later" was wrong and is not repeated.
+>
+> Eight regression tests across three files, because each of these survived a full green suite: the shapes
+> that trigger them appear in no fixture. `npm run verify` green end to end — 335 tests across 29 files.
+>
+> (That sentence said "five" when first written, which was wrong — 327 → 332 added two cassette tests and
+> three progress tests, then 335 added three adapter tests. A miscount in the banner announcing these fixes,
+> which is the defect class the banner is about. Counted, not recalled, this time.)
 - **`recompile` refuses on both committed traces** — they predate the literals-not-symbols fix. The command
   works on a fresh trace; README now says so rather than leaving a reviewer to discover it.
 - **A targetless `read` step is silently skipped and counted complete**, and an `assert` step emits no
@@ -1140,3 +1175,50 @@ they now close); `verify-no-llm` catching all three planted import forms; `verif
 `demo:offline` passing its 9 checks. The two schema refinements added here rejected nothing that already
 exists, which is the house rule for telling a tightened rule from a broken one.
 → *Determinism & error handling*, *Heterogeneity & multi-tenant*, *Safety*, *Escalation & handoff*, *Evidence*, *Cuts*
+
+## Three findings that lived only in REPORT (2026-09-13)
+
+Written down because REPORT is being cut to the length the brief asks for, and a check of what the cut
+would destroy found three passages this log had never recorded. Two of them are corrections made LAST
+NIGHT, put into the reviewer-facing document and not into the log that exists to hold exactly this. A
+decision log you only write to when you remember is a decision log with holes in it, and the holes are
+invisible until something forces an inventory.
+
+**1. `Output.type` had no consumer, and fixing it changed a returned value's JSON type.** The executor
+wrote the raw string it read off the screen, while the result contract's own docstring claimed the values
+were "already validated against its schema" — so a declared type was decoration. A declared output is now
+coerced where it is captured: an `integer` returns a JSON **number** or fails as a typed
+`contract_violation`; a `boolean` returns `true`/`false` from the spellings a green-screen actually renders;
+a `string` is unchanged. This is a BREAKING change for a caller, stated plainly because it is the sort that
+otherwise surfaces as a type error in someone else's code: an agent binding an `integer` output used to
+receive digits as a string and now receives a number.
+
+**2. The evidence-on-failure gap was recorded as the wrong half, and the true half is worse.** REPORT
+listed "the replay CLI writing no evidence if `replay()` itself throws" as a known gap. That is false:
+`replay()` is called INSIDE the guarded region, so the `finally` runs, events have already streamed through
+the sink, and `capability.json` plus a `manifest.json` carrying `result: "aborted"` are written. The real
+gap is adjacent and was undocumented — `PlaywrightSurface.launch` and `OperatorConsole.start` sit OUTSIDE
+that region, while the run directory is created before them. So a failure to launch leaves a directory with
+no manifest, which this project's own `verify:evidence` rejects as an incomplete run. `replay/main.ts`
+carries a banner reading "EVIDENCE IS WRITTEN WHATEVER HAPPENED", and it is false in exactly the one case
+the README had failed to name. Found by a reviewer, not by us.
+
+**0. Escalation used to be flattened into `policy_denied`, and this log never recorded it.** Found the same
+way as the three below — by checking, before cutting REPORT, what the cut would destroy. Repeated greps
+here for `flatten`, `policy_denied`, `requires: human` and `escalation instead` return nothing, so REPORT
+was the only record. The defect: when the policy rated an action as needing a person, the gate answered the
+same way it answers a forbidden action, so a caller could not tell **"a human must approve this"** from
+**"this is never permitted, do not retry"** — two facts that call for opposite responses, collapsed into
+one. The gate now returns `requires: "human"` and the executor routes it to escalation rather than to a
+failure. Worth keeping because it is the same defect class as conflating a business outcome with a crash,
+one level up: a result union that cannot express a distinction the caller has to act on.
+
+**3. Static-text reads: the conclusion was right and the stated reason was wrong.** REPORT said discovery
+"has no tool that mints such a target". It has one — `discover/executor.ts` mints from `describe(ref)` and
+proves the target by calling `surface.read()`, which has a static-text fallback for exactly this shape.
+What actually blocks it sits one layer earlier, in what the model is shown: `surface/serialize.ts` emits a
+ref only for ACTIONABLE roles, so a static-text node never reaches the model as something it could name.
+The distinction matters for anyone planning the work — the fix is three lines in the serializer's role
+list, not a new tool — and a correct conclusion resting on a wrong reason is the same defect class as a
+false claim, just harder to catch, because nobody re-checks a sentence they already agree with.
+→ *Artifact schema*, *Determinism & error handling*, *Evidence*, *Cuts*

@@ -11,10 +11,13 @@
  * The three the spec names are the easy ones. The two that matter in practice are
  * the ones it does not:
  *
- *   NO PROGRESS   the surface digest is unchanged across consecutive actions.
- *                 The model believes it is acting; the application disagrees.
- *                 This is the honest detector for a dead end, because a model
- *                 rarely announces one — it just keeps trying.
+ *   NO PROGRESS   the surface digest is unchanged across consecutive SCREEN-
+ *                 CHANGING actions (`click`, `dialog`). The model believes it is
+ *                 acting; the application disagrees. This is the honest detector
+ *                 for a dead end, because a model rarely announces one — it just
+ *                 keeps trying. Reads and fills are excluded on measurement, not
+ *                 taste: neither can move the digest, so counting them aborted
+ *                 correct runs. See `MOVES_SCREEN` in `executor.ts`.
  *
  *   REPEATED ERROR the same tool error comes back repeatedly. Distinct from no
  *                 progress: the surface may well be changing while every attempt
@@ -43,7 +46,7 @@ export interface StopVerdict {
 export interface StopLimits {
   readonly maxSteps: number;
   readonly maxSeconds: number;
-  /** Consecutive identical surface digests before calling it a dead end. */
+  /** Consecutive identical surface digests, across SCREEN-CHANGING actions, before calling it a dead end. */
   readonly noProgressLimit: number;
   /** Consecutive identical tool errors before giving up on that approach. */
   readonly repeatedErrorLimit: number;
@@ -114,11 +117,19 @@ export class StopController {
    * The dead-end detector. A model almost never says "I am stuck" — it keeps
    * acting with confidence while the screen stays exactly as it was.
    *
-   * FED FROM ACTING OUTCOMES ONLY, and the caller owes that: the verdict below
-   * asserts that the model acted and the application did not respond, so a
-   * perception turn reaching here would make the stop reason a false statement
-   * about what happened. Consecutive perception turns are bounded by `maxSteps`
-   * instead, which is the limit that actually describes them.
+   * FED ONLY FROM TOOLS EXPECTED TO CHANGE THE SCREEN — `click` and `dialog`, the
+   * set named by `MOVES_SCREEN` in `executor.ts`. The caller owes that, because the
+   * verdict below asserts the model acted and the application did not respond.
+   *
+   * This said "fed from ACTING outcomes only" until 2026-09-13, and the caller did
+   * not owe what it claimed: a `read` issues no surface action at all yet reached
+   * here, and a `fill` cannot move the digest even when it lands, because the
+   * digest is built from `innerText` and input values are not in it. Both made the
+   * stop reason a false statement, and aborted correct runs at four turns.
+   *
+   * Everything excluded is bounded by `maxSteps`, `maxSeconds` and `maxTokens`
+   * instead — weaker, and honestly so: a run that only reads or fills now spends up
+   * to the 40-step ceiling before stopping rather than four turns.
    */
   recordObservation(digest: string): StopVerdict {
     this.sameDigestRun = digest === this.lastDigest ? this.sameDigestRun + 1 : 0;
