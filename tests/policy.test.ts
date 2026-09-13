@@ -91,7 +91,16 @@ describe("policy evaluation", () => {
     expect(d.dimension).toBe("origin");
   });
 
-  it("plan origins are validated before a browser is ever launched", () => {
+  /**
+   * RENAMED, loudly, because the old name claimed a system property this test
+   * does not exercise. It was "plan origins are validated before a browser is
+   * ever launched" — but nothing here launches anything, and nothing here calls
+   * a CLI. All it exercises is the pure function: given a policy and a list of
+   * urls, which ones are off the allowlist. The ORDERING claim (that this runs
+   * before `PlaywrightSurface.launch`) is a property of the replay CLI and has
+   * to be asserted there against the CLI, not here against the helper.
+   */
+  it("validatePlanOrigins returns every plan url whose origin is off the allowlist", () => {
     const bad = validatePlanOrigins(policy, [
       "http://localhost:7101/screen/search",
       "http://localhost:7102/screen/search",

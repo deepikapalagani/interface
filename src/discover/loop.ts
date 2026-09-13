@@ -18,11 +18,12 @@
  * the action history stays legible, and only the latest screen is rendered in
  * full.
  */
+import type { RiskProfile } from "../compile/risk-profile.js";
 import type { EventSequencer } from "../evidence/events.js";
 import type { ModelProvider, Turn } from "../model/provider.js";
 import { observationSummary, observationToText } from "../surface/serialize.js";
 import type { Surface } from "../surface/types.js";
-import { execute, type TraceEntry } from "./executor.js";
+import { execute, isStepEntry, stepRefOf, type TraceEntry } from "./executor.js";
 import { StopController, type StopLimits, type StopReason } from "./stops.js";
 import { TOOL_SPECS } from "./tools.js";
 
@@ -52,6 +53,12 @@ export interface DiscoveryDeps {
   readonly actor: () => "automation" | "human";
   /** The lease epoch as each action is built, carried to the gate's fence. */
   readonly epoch: () => number;
+  /**
+   * What acting on each screen can do to the application, passed straight to the
+   * executor. Discovery acts without a recorded plan, so an unrated screen is
+   * refused rather than acted on at the least conservative label.
+   */
+  readonly riskProfile: RiskProfile;
   /**
    * The structured log §3.5 asks for. Optional so tests need not supply one, but
    * a real run must: this is the only place the `model_decision` arm is ever
@@ -106,7 +113,7 @@ const statedReason = (args: Readonly<Record<string, unknown>>): string => {
 };
 
 export const runDiscovery = async (goal: string, deps: DiscoveryDeps): Promise<DiscoveryResult> => {
-  const { provider, surface, actor, epoch, log } = deps;
+  const { provider, surface, actor, epoch, log, riskProfile } = deps;
   const stops = new StopController(deps.limits, deps.now);
   const maxTokens = deps.maxTokensPerTurn ?? 2048;
 
@@ -138,10 +145,6 @@ export const runDiscovery = async (goal: string, deps: DiscoveryDeps): Promise<D
       // Forced: the model's job is to act, and a turn of prose is a wasted turn.
       toolChoice: "required",
       maxTokens,
-      // Reasoning stays ON here — this is the half of the system where the model
-      // is genuinely deciding something. It is disabled for the mechanical
-      // compile pass instead.
-      reasoning: true,
     });
 
     promptTokens += response.usage.promptTokens;
@@ -174,7 +177,20 @@ export const runDiscovery = async (goal: string, deps: DiscoveryDeps): Promise<D
       continue;
     }
 
-    const outcome = await execute(trace.length + 1, call.name, call.args, { surface, actor, epoch });
+    /**
+     * The step ref this call will carry IF it becomes an ordered step, computed
+     * from the SAME filter the compiler uses. The evidence used to cite
+     * `s0{trace.length}` — counting dialog entries, which the compiler drops from
+     * the step list — so after any dialog every citation named a different step
+     * than the artifact has.
+     */
+    const stepRef = stepRefOf(trace.filter(isStepEntry).length + 1);
+    const outcome = await execute({ index: trace.length + 1, stepRef }, call.name, call.args, {
+      surface,
+      actor,
+      epoch,
+      riskProfile,
+    });
 
     /**
      * ONE event per turn, emitted AFTER the call has run so a single line can
@@ -201,8 +217,11 @@ export const runDiscovery = async (goal: string, deps: DiscoveryDeps): Promise<D
     let summary: string;
 
     if (outcome.kind === "terminal") {
-      stopped = outcome.tool === "finish" ? "goal_reached" : "gave_up";
-      detail = outcome.detail;
+      // Through `declared()` rather than mapping inline here: the controller owns
+      // every stop reason in this system, and two copies of one mapping drift.
+      const verdict = stops.declared(outcome.tool, outcome.detail);
+      stopped = verdict.reason ?? "gave_up";
+      detail = verdict.detail;
       record(outcome.detail);
       deps.onTurn?.(stops.stepCount, `${outcome.tool}: ${outcome.detail}`);
       break;
@@ -222,20 +241,30 @@ export const runDiscovery = async (goal: string, deps: DiscoveryDeps): Promise<D
       }
     } else {
       stops.recordToolSuccess();
-      if (outcome.kind === "acted") trace.push(outcome.entry);
       resultText = observationToText(outcome.observation);
       summary = `(${call.name} ok) ${observationSummary(outcome.observation)}`;
-      record(
-        observationSummary(outcome.observation),
-        outcome.kind === "acted" ? `s${String(trace.length).padStart(2, "0")}` : undefined,
-      );
 
-      const progress = stops.recordObservation(outcome.observation.digest);
-      if (progress.stop && progress.reason) {
-        history.push({ role: "tool", callId: call.id, content: resultText });
-        stopped = progress.reason;
-        detail = progress.detail;
-        break;
+      if (outcome.kind === "acted") {
+        trace.push(outcome.entry);
+        record(observationSummary(outcome.observation), isStepEntry(outcome.entry) ? stepRef : undefined);
+
+        /**
+         * Only an ACTING turn feeds the dead-end detector, because its verdict
+         * says the application did not respond to an action. Every successful
+         * tool used to feed it, so four consecutive `observe` calls ended a run
+         * with a detail asserting the model was acting when it had issued nothing
+         * at all. Consecutive perception turns are now bounded by the step
+         * ceiling, which is the limit that actually describes them.
+         */
+        const progress = stops.recordObservation(outcome.observation.digest);
+        if (progress.stop && progress.reason) {
+          history.push({ role: "tool", callId: call.id, content: resultText });
+          stopped = progress.reason;
+          detail = progress.detail;
+          break;
+        }
+      } else {
+        record(observationSummary(outcome.observation));
       }
     }
 

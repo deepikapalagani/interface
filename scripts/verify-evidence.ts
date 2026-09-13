@@ -19,13 +19,20 @@
  *                 existing --run-id appends (measured: `event()` uses
  *                 appendFileSync while every other writer truncates).
  *
- *   CONSISTENT    the manifest's claims match the run's own files. The claim
- *                 that matters is `model.calls`: zero on replay is the central
- *                 argument of the whole submission, and non-zero on discovery is
- *                 what makes the discovery run real. Neither is taken on trust —
- *                 a discovery manifest is checked against the assistant turns in
- *                 its own transcript, so a false `calls: 0` is provably false
- *                 rather than merely suspicious.
+ *   CONSISTENT    the manifest's claims match the run's own files — and the two
+ *                 sides of the `model.calls` claim are NOT equally checked, so
+ *                 this says which is which rather than "neither is taken on
+ *                 trust", which was false of the replay half.
+ *                 On DISCOVERY the count is cross-examined against the assistant
+ *                 turns in the run's own transcript, so a false `calls: 0` is
+ *                 provably false. That check is one-sided — it can only catch an
+ *                 UNDERCOUNT — and a run that commits no transcript evades it
+ *                 entirely.
+ *                 On REPLAY the only rule is `calls === 0`: that the file says
+ *                 what it is supposed to say. Nothing here can tell a truthful
+ *                 zero from a written one. The structural argument for the replay
+ *                 claim is not in this script at all — it is
+ *                 `verify-no-llm.ts`, which reads the import graph.
  *
  *   SAFE          no secret or raw PII anywhere under evidence/ (§3.4-e). The
  *                 seeded PAN/SSN literals and the live MODEL_API_KEY are read at
@@ -58,8 +65,19 @@
  *     could not be sourced from mock/seed.ts;
  *   - it prints how many runs and files it scanned;
  *   - `--self-test` builds a deliberately broken evidence tree in a temp
- *     directory and asserts that EVERY class of check fires on it, so the checks
- *     are proven live one by one rather than assumed to be.
+ *     directory and asserts each planted defect is caught by the check that owns
+ *     it.
+ *
+ *     It did NOT prove that one-by-one until 2026-09-13, and the correction is
+ *     worth keeping: the expected-offence needles were plain substrings that
+ *     cross-satisfied one another, so "missing required field" was answered
+ *     equally by the manifest loop, the event loop, the why-arm loop and the
+ *     handoff loop. MEASURED: a reviewer deleted the ENTIRE manifest
+ *     required-fields loop and the self-test still reported every class caught,
+ *     exit 0. Every offence now carries a prefix naming the record it came from
+ *     ("the manifest is missing…", "an event line is missing…", "why arm …",
+ *     "a handoff record is missing…") and every needle includes that prefix, so
+ *     deleting a check leaves its own needle unmatched and nothing else's.
  *
  * Run: npx tsx scripts/verify-evidence.ts [--self-test]
  */
@@ -96,6 +114,23 @@ const KNOWN_FILES = ["events.jsonl", "capability.json", "manifest.json", "trace.
 const DISCOVERY_ONLY_FILES = ["trace.jsonl", "transcript.jsonl"];
 
 const MANIFEST_FIELDS = ["runId", "phase", "startedAt", "endedAt", "target", "tenant", "model", "result", "versions"];
+
+/**
+ * Declared but optional — and the manifest is now held to the SAME closed-record
+ * rule this script applies to why-arms and handoff records.
+ *
+ * It was the one record exempt from it, and every committed manifest already
+ * carried an undeclared `capability` key: the rule "an undeclared field is one no
+ * redactor was written for and no reviewer reads" was being argued in two places
+ * and enforced in two of three. `capability` is declared here and its shape is
+ * checked below.
+ *
+ * `artifactContentHash` ties a run to the exact artifact bytes it replayed.
+ * Declared whether or not a writer emits it yet: naming a field that never
+ * appears costs nothing, while leaving it undeclared would turn its arrival into
+ * an offence.
+ */
+const MANIFEST_OPTIONAL_FIELDS = ["capability", "artifactContentHash"];
 
 const PHASES = ["discovery", "replay", "handoff"];
 const CONTROL_OWNERS = ["automation", "human", "released"];
@@ -168,10 +203,21 @@ interface Problem {
   readonly offence: string;
 }
 
-/** Exact values to hunt for, sourced at runtime. `label` is what gets printed; `value` never is. */
+/**
+ * Exact values to hunt for, sourced at runtime. `label` is what gets printed;
+ * `value` never is.
+ *
+ * `kind` exists so the ground-truth floor in `main` can be PER CLASS. Counting
+ * PANs and SSNs in one list meant a reseed that changed only the SSN rendering
+ * would keep the floor satisfied while that whole class of ground truth silently
+ * vanished — which is the failure mode the floor exists to prevent, one level in.
+ */
+type SecretKind = "PAN" | "SSN" | "key";
+
 interface Secret {
   readonly label: string;
   readonly value: string;
+  readonly kind: SecretKind;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -220,23 +266,39 @@ const seededLiterals = (): Secret[] => {
   const out: Secret[] = [];
   for (const m of source.matchAll(/pan:\s*"(\d{12,19})"/g)) {
     const v = m[1];
-    if (v) out.push({ label: `seeded PAN ...${v.slice(-4)}`, value: v });
+    if (v) out.push({ label: `seeded PAN ...${v.slice(-4)}`, value: v, kind: "PAN" });
   }
   for (const m of source.matchAll(/"(\d{3}-\d{2}-\d{4})"/g)) {
     const v = m[1];
-    if (v) out.push({ label: `seeded SSN ...${v.slice(-4)}`, value: v });
+    if (v) out.push({ label: `seeded SSN ...${v.slice(-4)}`, value: v, kind: "SSN" });
   }
   return out;
 };
 
 /**
- * The live model key. Short values are ignored deliberately: an unset or
- * placeholder key would otherwise be a substring that matches half the tree and
- * buries the real signal.
+ * The live model key — and whether this detector EXISTS on this machine.
+ *
+ * It reads `.env`, which is gitignored, so in any clone there is nothing to
+ * source and the by-value key detector silently ceases to exist. The script used
+ * to report "no secrets or PII found" either way, which reads as a clean scan
+ * rather than as a scan that could not look. `active` is now carried out to the
+ * summary so the reader is told which of the two they are looking at.
+ *
+ * Short values are ignored deliberately: an unset or placeholder key would
+ * otherwise be a substring that matches half the tree and buries the real signal.
  */
-const envSecrets = (): Secret[] => {
+interface KeyDetector {
+  readonly secrets: readonly Secret[];
+  readonly active: boolean;
+  /** Why it is inactive. Empty when it is active. */
+  readonly why: string;
+}
+
+const liveKeyDetector = (): KeyDetector => {
   const source = readText(".env");
-  if (source === null) return [];
+  if (source === null) {
+    return { secrets: [], active: false, why: ".env is not present — it is gitignored, so this is every clone" };
+  }
   const out: Secret[] = [];
   for (const line of source.split("\n")) {
     const m = /^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*)$/.exec(line);
@@ -244,9 +306,12 @@ const envSecrets = (): Secret[] => {
     const name = m[1];
     const value = (m[2] ?? "").trim().replace(/^["']|["']$/g, "");
     if (name !== "MODEL_API_KEY" || value.length < 16) continue;
-    out.push({ label: "the live MODEL_API_KEY from .env", value });
+    out.push({ label: "the live MODEL_API_KEY from .env", value, kind: "key" });
   }
-  return out;
+  if (out.length === 0) {
+    return { secrets: [], active: false, why: ".env carries no MODEL_API_KEY of 16 or more characters" };
+  }
+  return { secrets: out, active: true, why: "" };
 };
 
 const checkJsonl = (file: string, text: string, problems: Problem[]): unknown[] => {
@@ -259,7 +324,7 @@ const checkJsonl = (file: string, text: string, problems: Problem[]): unknown[] 
     try {
       rows.push(JSON.parse(line));
     } catch {
-      problems.push({ where: `${file}:${i + 1}`, offence: "not valid JSON" });
+      problems.push({ where: `${file}:${i + 1}`, offence: "line is not valid JSON" });
     }
   });
   return rows;
@@ -278,7 +343,7 @@ const checkWhy = (where: string, why: unknown, problems: Problem[]): string | nu
   const arm = WHY_ARMS[as] ?? {};
   for (const [field, type] of Object.entries(arm)) {
     if (!(field in why)) {
-      problems.push({ where, offence: `why.as "${as}" is missing required field "${field}"` });
+      problems.push({ where, offence: `why arm "${as}" is missing required field "${field}"` });
     } else if (typeof why[field] !== type) {
       problems.push({ where, offence: `why.${field} should be ${type} on arm "${as}", got ${typeof why[field]}` });
     }
@@ -319,7 +384,7 @@ const checkEvents = (
     }
 
     for (const field of EVENT_FIELDS) {
-      if (!(field in row)) problems.push({ where, offence: `missing required field "${field}"` });
+      if (!(field in row)) problems.push({ where, offence: `an event line is missing required field "${field}"` });
     }
 
     // Gaplessness, read from the file. seq is 1-based and dense; anything else
@@ -329,16 +394,16 @@ const checkEvents = (
     }
 
     if (!isIsoInstant(row["at"])) {
-      problems.push({ where, offence: `at ${JSON.stringify(row["at"])} is not an ISO-8601 instant` });
+      problems.push({ where, offence: `an event line's at ${JSON.stringify(row["at"])} is not an ISO-8601 instant` });
     } else if (typeof row["at"] === "string") {
       if (previousAt !== "" && row["at"] < previousAt) {
-        problems.push({ where, offence: `at ${row["at"]} precedes the previous line's ${previousAt} — the log is not in time order` });
+        problems.push({ where, offence: `the event log is not in time order: ${row["at"]} precedes the previous line's ${previousAt}` });
       }
       previousAt = row["at"];
     }
 
     if (row["runId"] !== runId) {
-      problems.push({ where, offence: `runId ${JSON.stringify(row["runId"])} does not match the manifest's "${runId}"` });
+      problems.push({ where, offence: `an event line's runId ${JSON.stringify(row["runId"])} does not match the manifest's "${runId}"` });
     }
 
     const phase = row["phase"];
@@ -448,7 +513,7 @@ const checkHandoff = (
 
     for (const field of ["requestedAt", "resolvedAt"]) {
       if (field in row && !isIsoInstant(row[field])) {
-        problems.push({ where, offence: `${field} ${JSON.stringify(row[field])} is not an ISO-8601 instant` });
+        problems.push({ where, offence: `a handoff record's ${field} ${JSON.stringify(row[field])} is not an ISO-8601 instant` });
       }
     }
 
@@ -462,7 +527,7 @@ const checkHandoff = (
     }
 
     if (row["runId"] !== runId) {
-      problems.push({ where, offence: `runId ${JSON.stringify(row["runId"])} does not match the manifest's "${runId}"` });
+      problems.push({ where, offence: `a handoff record's runId ${JSON.stringify(row["runId"])} does not match the manifest's "${runId}"` });
     }
   });
 
@@ -485,7 +550,26 @@ const checkManifest = (file: string, raw: unknown, dirName: string, problems: Pr
   }
 
   for (const field of MANIFEST_FIELDS) {
-    if (!(field in raw)) problems.push({ where: file, offence: `missing required field "${field}"` });
+    if (!(field in raw)) problems.push({ where: file, offence: `the manifest is missing required field "${field}"` });
+  }
+
+  // The closed-record rule, applied here for the first time. See
+  // MANIFEST_OPTIONAL_FIELDS.
+  for (const field of Object.keys(raw)) {
+    if (!MANIFEST_FIELDS.includes(field) && !MANIFEST_OPTIONAL_FIELDS.includes(field)) {
+      problems.push({ where: file, offence: `the manifest carries "${field}", which a manifest does not declare` });
+    }
+  }
+
+  if ("capability" in raw) {
+    const capability = raw["capability"];
+    if (!isRecord(capability) || typeof capability["id"] !== "string" || typeof capability["version"] !== "string") {
+      problems.push({ where: file, offence: "manifest capability must carry id and version as strings" });
+    }
+  }
+
+  if ("artifactContentHash" in raw && (typeof raw["artifactContentHash"] !== "string" || raw["artifactContentHash"] === "")) {
+    problems.push({ where: file, offence: "manifest artifactContentHash must be a non-empty string when present" });
   }
 
   if (raw["runId"] !== dirName) {
@@ -494,7 +578,7 @@ const checkManifest = (file: string, raw: unknown, dirName: string, problems: Pr
 
   for (const field of ["startedAt", "endedAt"]) {
     if (!isIsoInstant(raw[field])) {
-      problems.push({ where: file, offence: `${field} ${JSON.stringify(raw[field])} is not an ISO-8601 instant` });
+      problems.push({ where: file, offence: `the manifest's ${field} ${JSON.stringify(raw[field])} is not an ISO-8601 instant` });
     }
   }
   const started = raw["startedAt"];
@@ -683,28 +767,41 @@ const checkEvidence = (runRoot: string, scanRoot: string, secrets: readonly Secr
 };
 
 /**
- * Builds a deliberately broken evidence tree and asserts that each class of
- * check fires on it. Keyed by a substring of the offence so the assertion names
- * WHICH check was proven live — "at least one problem" would pass even if a
- * single over-eager check were doing all the work.
+ * Builds a deliberately broken evidence tree and asserts that each planted
+ * defect is caught BY THE CHECK THAT OWNS IT.
+ *
+ * Every needle below names the record it belongs to, and no needle is a
+ * substring of another. That is the whole correction of 2026-09-13: with plain
+ * shared substrings, deleting the manifest required-fields loop outright still
+ * left every expectation satisfied by some other loop's message, and this
+ * self-test reported all classes caught. The rule now is that one deleted check
+ * leaves exactly one needle unmatched.
  */
 const selfTest = (secrets: readonly Secret[]): boolean => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "verify-evidence-"));
   const expectations: { readonly needle: string; readonly proves: string }[] = [
-    { needle: "missing required field", proves: "manifest required fields" },
-    { needle: "is not an ISO-8601 instant", proves: "well-formed timestamps" },
+    { needle: "the manifest is missing required field", proves: "manifest required fields" },
+    { needle: "the manifest carries", proves: "the manifest is a CLOSED record" },
+    { needle: "manifest capability must carry", proves: "the declared capability field's shape" },
+    { needle: "does not match its directory name", proves: "manifest runId matches its directory" },
+    { needle: "the manifest's startedAt", proves: "manifest timestamps" },
+    { needle: "an event line is missing required field", proves: "event required fields" },
+    { needle: "an event line's runId", proves: "event runId matches the manifest" },
+    { needle: "the event log is not in time order", proves: "events are in time order" },
+    { needle: "is not one of automation, human, released", proves: "controlOwner is a closed set" },
     { needle: "the log has a gap", proves: "gapless seq" },
     { needle: "not one of the six legal arms", proves: "legal why arms" },
-    { needle: "is missing required field", proves: "per-arm required fields" },
+    { needle: 'why arm "model_decision" is missing required field', proves: "per-arm required fields" },
     { needle: "a model_decision event in a", proves: "model_decision is discovery-only" },
     { needle: "must be exactly 0", proves: "replay claims zero model calls" },
-    { needle: "not valid JSON", proves: "JSONL well-formedness" },
+    { needle: "line is not valid JSON", proves: "JSONL well-formedness" },
     { needle: "fails the capability schema", proves: "the real capability schema" },
     { needle: "unrecognised file", proves: "no undeclared evidence files" },
     { needle: "a handoff record is missing required field", proves: "handoff required fields" },
-    { needle: "should be string, got", proves: "handoff field types" },
+    { needle: 'handoff field "stepRef" should be string, got number', proves: "handoff field types" },
     { needle: "which a handoff record does not declare", proves: "handoff rejects unknown fields" },
     { needle: "is not one of resolved, abort, timeout", proves: "handoff disposition is a closed set" },
+    { needle: "a handoff record's runId", proves: "handoff runId matches the manifest" },
     { needle: "no event line with phase", proves: "handoff.jsonl reconciles with the event log" },
   ];
   for (const s of secrets) expectations.push({ needle: `contains ${s.label}`, proves: `leak of ${s.label}` });
@@ -713,25 +810,31 @@ const selfTest = (secrets: readonly Secret[]): boolean => {
     const bad = path.join(tmp, "runs", "replay-broken");
     fs.mkdirSync(bad, { recursive: true });
 
-    // A replay manifest that claims model calls, names the wrong directory, and
-    // carries a malformed timestamp and no tenant.
+    // A replay manifest broken six ways: it claims model calls, carries a runId
+    // that matches neither its directory nor its own event lines, a malformed
+    // startedAt, no tenant, a `capability` missing its version, and a `notes`
+    // field no writer declares.
     fs.writeFileSync(path.join(bad, "manifest.json"), JSON.stringify({
-      runId: "replay-broken",
+      runId: "replay-WRONG",
       phase: "replay",
       startedAt: "2026-13-45T99:99:99Z",
       endedAt: "2026-09-12T18:00:00.000Z",
       target: "http://localhost:7101/",
+      capability: { id: "msc.card.set_status" },
       model: { provider: "glm-4.7-flash", calls: 2 },
       result: "success",
       versions: { node: "20.17.0", playwright: "1.63.0" },
+      notes: "a field nobody declared",
     }));
 
-    // seq jumps 1 -> 3, one arm is illegal, one arm is missing a field, and a
-    // model_decision appears in a replay run.
+    // seq jumps 1 -> 3; one arm is illegal; one arm is missing a field; a
+    // model_decision appears in a replay run; the third line has no
+    // controlOwner and steps BACKWARDS in time; and one line is not JSON.
     const line = (o: unknown): string => `${JSON.stringify(o)}\n`;
     fs.writeFileSync(path.join(bad, "events.jsonl"),
       line({ seq: 1, at: "2026-09-12T18:00:00.000Z", runId: "replay-broken", phase: "replay", controlOwner: "automation", event: "step.acted", stepRef: "s01", why: { as: "vibes" } }) +
       line({ seq: 3, at: "2026-09-12T18:00:01.000Z", runId: "replay-broken", phase: "replay", controlOwner: "automation", event: "step.acted", stepRef: "s02", why: { as: "model_decision", stated: "because", model: "glm" } }) +
+      line({ seq: 3, at: "2026-09-12T17:59:00.000Z", runId: "replay-broken", phase: "replay", event: "step.acted", stepRef: "s03", why: { as: "artifact_step", capability: "c", version: "1.0.0", stepRef: "s03" } }) +
       "{not json\n");
 
     fs.writeFileSync(path.join(bad, "capability.json"), JSON.stringify({ schemaVersion: 1 }));
@@ -779,14 +882,38 @@ const selfTest = (secrets: readonly Secret[]): boolean => {
 };
 
 const main = (): void => {
-  const secrets = [...seededLiterals(), ...envSecrets()];
+  const seeded = seededLiterals();
+  const key = liveKeyDetector();
+  const secrets: readonly Secret[] = [...seeded, ...key.secrets];
 
-  // Ground-truth floor. If the seed literals could not be sourced, the leak scan
-  // would still report a clean tree — the worst possible failure mode.
-  const seeded = seededLiterals().length;
-  if (seeded === 0) {
-    console.error("verify-evidence: could not source any PAN/SSN literal from mock/seed.ts — the leak scan would pass vacuously, so this is a failure.");
+  /**
+   * Ground-truth floor, PER CLASS.
+   *
+   * If the seed literals could not be sourced, the leak scan would still report
+   * a clean tree — the worst possible failure mode. Counting both classes in one
+   * total left a quieter version of the same hole: a reseed that changed only
+   * the SSN rendering would keep the total above zero while SSN ground truth
+   * vanished entirely, and the scan would go on reporting clean.
+   */
+  const counts: Readonly<Record<"PAN" | "SSN", number>> = {
+    PAN: seeded.filter((s) => s.kind === "PAN").length,
+    SSN: seeded.filter((s) => s.kind === "SSN").length,
+  };
+  const missingClasses = (["PAN", "SSN"] as const).filter((k) => counts[k] === 0);
+  if (missingClasses.length > 0) {
+    console.error(
+      `verify-evidence: could not source any ${missingClasses.join(" or ")} literal from mock/seed.ts ` +
+        `(found ${counts.PAN} PAN, ${counts.SSN} SSN) — that class of leak would go undetected while the scan still reported clean, so this is a failure.`,
+    );
     process.exit(1);
+  }
+
+  // Said BEFORE the result, so it is visible whether this run passes or fails.
+  if (!key.active) {
+    console.warn(
+      `verify-evidence: NOTE — the live MODEL_API_KEY detector is INACTIVE (${key.why}). ` +
+        "What follows is a scan for the seeded PII literals and the leak shapes only.",
+    );
   }
 
   if (process.argv.includes("--self-test") && !selfTest(secrets)) process.exit(1);
@@ -819,8 +946,18 @@ const main = (): void => {
 
   if (failed) process.exit(1);
 
-  console.log(`verify-evidence: OK — ${runs} run(s) under ${RUN_ROOT} complete and consistent, ${files} file(s) scanned, no secrets or PII found.`);
-  console.log(`  checked: manifest shape, gapless seq, why arms, handoff records against their phase:"handoff" event lines, model-call claims vs transcript, capability schema, ${secrets.length} secret literal(s) + ${LEAK_SHAPES.length} leak shapes`);
+  // Deliberately NOT "no secrets or PII found": this scan can only report that
+  // the literals it was GIVEN do not appear, and which literals it was given
+  // depends on what it could source. Both are stated.
+  console.log(`verify-evidence: OK — ${runs} run(s) under ${RUN_ROOT} complete and consistent, ${files} file(s) scanned, no seeded PII literal and no leak shape found.`);
+  console.log(`  checked: manifest shape (a closed record), gapless seq, why arms, handoff records against their phase:"handoff" event lines, model-call claims vs transcript, capability schema, ${secrets.length} secret literal(s) — ${counts.PAN} PAN, ${counts.SSN} SSN, ${key.secrets.length} key — + ${LEAK_SHAPES.length} leak shapes`);
+  console.log(
+    `  live MODEL_API_KEY detector: ${
+      key.active
+        ? "ACTIVE (sourced from .env at runtime)"
+        : `INACTIVE — ${key.why}. A committed key would be caught only by the api-key SHAPE above, never by value.`
+    }`,
+  );
 };
 
 main();

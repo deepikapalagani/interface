@@ -113,6 +113,12 @@ export class StopController {
   /**
    * The dead-end detector. A model almost never says "I am stuck" — it keeps
    * acting with confidence while the screen stays exactly as it was.
+   *
+   * FED FROM ACTING OUTCOMES ONLY, and the caller owes that: the verdict below
+   * asserts that the model acted and the application did not respond, so a
+   * perception turn reaching here would make the stop reason a false statement
+   * about what happened. Consecutive perception turns are bounded by `maxSteps`
+   * instead, which is the limit that actually describes them.
    */
   recordObservation(digest: string): StopVerdict {
     this.sameDigestRun = digest === this.lastDigest ? this.sameDigestRun + 1 : 0;
@@ -149,7 +155,11 @@ export class StopController {
     this.sameErrorRun = 0;
   }
 
-  /** The model declared it is done, or declared it is stuck. Both are typed outcomes. */
+  /**
+   * The model declared it is done, or declared it is stuck. Both are typed
+   * outcomes, and the loop routes its terminal tools through here so this module
+   * remains the single owner of every stop reason.
+   */
   declared(kind: "finish" | "stuck", detail: string): StopVerdict {
     return { stop: true, reason: kind === "finish" ? "goal_reached" : "gave_up", detail };
   }

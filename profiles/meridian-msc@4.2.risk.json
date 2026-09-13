@@ -1,0 +1,49 @@
+{
+  "_comment": "WHAT EACH SCREEN'S CONTROLS CAN DO TO THE APPLICATION — the input the compiler uses to establish a step's risk class, and the one thing neither a trace nor a model can supply. Keyed on canonical SYMBOLS so it serves every tenant running MERIDIAN MSC 4.2, exactly as the artifact and the policy's screenRules are. A screen that is absent here does not get a safe default: the compiler REFUSES, and a discovery run refuses to act. That is deliberate — the label this file replaced was `read_only` stamped on every step, which read as a measurement and was an assumption.",
+  "app": "MERIDIAN MSC",
+  "profileVersion": "meridian-msc@4.2",
+  "screens": [
+    {
+      "screen": "SIGN_ON",
+      "risk": "read_only",
+      "note": "Authenticates a session; it changes no member record. The passcode field is a credential rather than a risk class — safety/redact.ts masks it by field name, and a policy's deniedFields is where automation is stopped from filling one."
+    },
+    {
+      "screen": "MENU",
+      "risk": "read_only",
+      "note": "Navigation only. Every control is a link to another screen."
+    },
+    {
+      "screen": "MEMBER_SEARCH",
+      "risk": "read_only",
+      "note": "A query form. Filling it and submitting it runs a lookup; mock/main.ts answers /screen/results with a pure read and appends no audit row."
+    },
+    {
+      "screen": "MEMBER_RESULTS",
+      "risk": "read_only",
+      "note": "A results grid whose only controls open a member. Reading, not writing."
+    },
+    {
+      "screen": "MEMBER_DETAIL",
+      "risk": "read_only",
+      "note": "A read-only servicing view. Its one link leads to card services, which is where anything can change."
+    },
+    {
+      "screen": "CARD_SERVICES",
+      "risk": "reversible",
+      "note": "THE ONLY SCREEN FROM WHICH THIS APPLICATION CHANGES ANYTHING (mock/main.ts: POST /screen/card-action is its single mutating route). Rated at the screen rather than at the submit, because a form's fields and its submit are one transaction: the value typed into ACTION is what decides what commits. FREEZE and UNFREEZE are the two codes reachable without supervisor authority, and both are reversible by re-running the same capability with the opposite code.",
+      "controls": [
+        {
+          "target": "OVERRIDE_CODE",
+          "risk": "irreversible",
+          "note": "Supplying the supervisor override is what unlocks LOST_STOLEN, the one status this application cannot undo (mock/actions.ts refuses it with MSG 0140 when the field is empty). A plan that types one is therefore rated irreversible whatever else it does, which under the shipped policy (irreversible: confirm) means it escalates to a person instead of running unattended."
+        }
+      ]
+    },
+    {
+      "screen": "CONFIRMATION",
+      "risk": "read_only",
+      "note": "The transaction has already committed by the time this renders. Nothing on it acts; a capability reads its confirmation number and stops."
+    }
+  ]
+}

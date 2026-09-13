@@ -46,7 +46,24 @@ import {
   type TargetFacts,
 } from "./types.js";
 
-/** Emitted for every gate decision, allowed or not — the audit of the guardrail itself. */
+/**
+ * One gate decision, allowed or refused, handed to whatever the constructor was
+ * given as `onDecision`.
+ *
+ * WHETHER IT IS RECORDED IS THE CALLER'S CHOICE. `onDecision` defaults to a
+ * no-op, so this type is only an audit if the constructing caller makes it one.
+ * Both production wiring sites now do: `src/replay/main.ts` passes a handler that
+ * emits a `gate.decided` line on the `policy` why-arm, and `src/discover/main.ts`
+ * passes one too — so an ALLOW verdict reaches `events.jsonl` and not just a
+ * refusal. Verified in a real run: an armed-fault replay wrote `gate.decided`
+ * ahead of every `step.acted`.
+ *
+ * The default still matters, because it is what every in-repo Surface stub and
+ * any embedder gets by default: constructing a `GatedSurface` without a handler
+ * enforces the policy exactly as hard and records none of it. Enforcement and
+ * audit are separate choices here, deliberately — but a caller that wants the
+ * audit has to ask for it.
+ */
 export interface GateEvent {
   readonly stepRef: string | null;
   readonly action: string;

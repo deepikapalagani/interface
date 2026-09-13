@@ -96,8 +96,10 @@ const readBody = (req: http.IncomingMessage): Promise<string> =>
 /**
  * A one-shot CRD0500 fault, consumed by the render it fires on.
  *
- * Self-disarming is what lets a declared "recover and continue" rule terminate:
- * the second attempt meets a clean screen rather than the same dialog forever.
+ * Self-disarming is a property of the APP: the second render of this screen is
+ * clean, so anything that retries meets a clean screen rather than the same
+ * dialog forever. Whether the automation recovers is the engine's business, and
+ * `scripts/fault.ts` is where that expectation is stated and checked.
  */
 const takeCardScreenFault = (state: MockState): CardScreenFaults => {
   if (state.armedFault === "broadcast") {
@@ -119,9 +121,11 @@ export const createServer = (tenant: TenantConfig): http.Server => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
 
-    // ---- admin plane. The allowlist denies /__admin to the automation, which is
-    //      what stops a capability from arming its own faults or resetting the
-    //      app it is being measured against.
+    // ---- admin plane. No capability reaches these routes, but not because of the
+    //      allowlist: `deniedRoutes: ["/__admin"]` is matched against the page an
+    //      action starts from, not where it lands, so it is a declared intent. What
+    //      enforces it is that no SurfaceAction verb can POST to an arbitrary URL
+    //      and no screen below renders a control reaching /__admin.
     if (path === "/__admin/reset" && req.method === "POST") {
       srv.state = freshState();
       return json(res, { reset: true, tenant: t.id });
@@ -268,7 +272,15 @@ export const createServer = (tenant: TenantConfig): http.Server => {
 
 /* ------------------------------------------------------------------ cli */
 
-const isMain = process.argv[1]?.endsWith("main.ts") ?? false;
+/**
+ * `mock/main.ts`, not `main.ts`.
+ *
+ * The loose form was satisfied by src/replay/main.ts, src/discover/main.ts and
+ * src/operator/main.ts alike, so importing `createServer` from any of them bound
+ * a second server on :7101 inside that process as a side effect of the import.
+ * src/operator/main.ts already uses this tighter form.
+ */
+const isMain = process.argv[1]?.endsWith("mock/main.ts") ?? false;
 if (isMain) {
   const arg = (name: string, fallback: string): string => {
     const i = process.argv.indexOf(`--${name}`);

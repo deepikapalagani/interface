@@ -20,13 +20,22 @@
  *
  * MEASURED (2026-09-12, GLM-4.7-Flash via Z.ai) and encoded in this contract:
  *   - tool calling works under both `auto` and `required`;
- *   - `json_schema` with `strict: true` is NOT honoured — it returned fenced
- *     markdown AND ignored the schema — so `parseJson` promises only that it
- *     returns parsed JSON, and callers MUST validate with their own schema;
  *   - roughly 2 in 8 calls return a 429, so retry-with-backoff is part of the
  *     adapter's contract rather than a caller's problem;
  *   - reasoning models spend output tokens before emitting anything, so a tight
  *     `maxTokens` yields an empty response rather than an error.
+ *
+ * ONE METHOD, NOT TWO. This interface used to declare `parseJson` as well, for a
+ * narrow model pass that would decide which recorded literals are really
+ * parameters. That pass is not built, so the method had no caller anywhere and
+ * both adapters carried an implementation nothing exercised — along with a
+ * `reasoning: false` option whose only purpose was to make that pass cheap, and
+ * which was never once passed. They are gone rather than kept warm: an unused
+ * method on a declared seam reads to a reviewer as a capability the system has.
+ * The measurement that shaped it is worth keeping even so, because it constrains
+ * whoever builds the pass: `json_schema` with `strict: true` was NOT honoured —
+ * it returned fenced markdown AND ignored the schema — so a structured-output
+ * caller must validate with its own schema rather than trusting the mode.
  */
 
 /** A tool the model may call. Arguments are described by a JSON Schema object. */
@@ -82,21 +91,15 @@ export interface ConverseOptions {
   readonly toolChoice: "auto" | "required";
   /** Generous by necessity: a reasoning model spends output before it speaks. */
   readonly maxTokens: number;
-  /** Off for the mechanical compile pass, on for the decision loop. */
-  readonly reasoning: boolean;
 }
 
-/**
- * Everything the system needs from a model. Two methods, because the loop and
- * the compile step want genuinely different things: a conversation that calls
- * tools, and a single structured extraction.
- */
+/** Everything the system needs from a model: one conversation that calls tools. */
 export interface ModelProvider {
   /** Stable identifier for the manifest, so a run records what actually drove it. */
   readonly id: string;
 
   /**
-   * How many requests this provider has actually made.
+   * How many HTTP requests this provider has actually made.
    *
    * Optional so a fake (cassette, test double) need not implement it, but a real
    * adapter must: a run manifest reporting a hardcoded count is worse than none,
@@ -107,15 +110,4 @@ export interface ModelProvider {
   readonly calls?: number;
 
   converse(history: readonly Turn[], options: ConverseOptions): Promise<ConverseResponse>;
-
-  /**
-   * One structured extraction.
-   *
-   * Returns parsed JSON and nothing stronger: schema enforcement is NOT
-   * guaranteed by any provider we target, so the caller validates with Zod and
-   * retries with the validation error appended. Promising more here would be a
-   * contract the measurements do not support.
-   */
-  parseJson(prompt: string, options: { maxTokens: number }): Promise<{ value: unknown; usage: Usage }>;
 }
-

@@ -1,0 +1,22 @@
+{
+ "runId": "escalation-timeout",
+ "phase": "replay",
+ "startedAt": "2026-09-13T08:01:48.322Z",
+ "endedAt": "2026-09-13T08:02:16.570Z",
+ "target": "http://localhost:7101/",
+ "tenant": "fcu",
+ "capability": {
+  "id": "msc.card.report_lost",
+  "version": "1.0.0"
+ },
+ "artifactContentHash": "c8fd2a254877aa17e895d906d4a5a3d16bf8e6fa5a35924ba5c7081072943c43",
+ "model": {
+  "provider": "none",
+  "calls": 0
+ },
+ "result": "failed",
+ "versions": {
+  "node": "20.17.0",
+  "playwright": "1.63.0"
+ }
+}

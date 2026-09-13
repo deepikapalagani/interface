@@ -1,0 +1,124 @@
+/**
+ * `npm run recompile` — build the artifact again from a trace already on disk.
+ *
+ * THIS EXISTS BECAUSE FOUR ERROR MESSAGES PROMISED IT AND NOTHING PROVIDED IT.
+ * `mechanical.ts` refuses a compile three ways — a literal the binding cannot
+ * name, a screen the risk profile does not rate, a checkpoint symbol it would
+ * have had to fabricate — and each refusal tells the operator to "add it and
+ * re-compile from trace.jsonl". Measured 2026-09-13: `compileMechanical` had
+ * exactly one caller (`src/discover/main.ts`), no npm script matched `compile`,
+ * and `discover` took no `--from-trace` flag. So the remedy named in every
+ * refusal could not be run, which is the same defect class the refusals exist to
+ * remove — a confident sentence with nothing behind it.
+ *
+ * It matters more than a convenience. A discovery run costs a model call and
+ * several minutes; a binding gap costs one line. Without this, a refused compile
+ * throws away the run rather than the line.
+ *
+ * The compiler reads the TRACE and never the transcript, so re-running it here is
+ * the same computation the discovery CLI performed, on the same input, with no
+ * model involved — this file imports no provider, and `verify-no-llm` would catch
+ * it if it did.
+ */
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { Binding } from "../src/capability/bind.js";
+import { safeParseCapability } from "../src/capability/schema.js";
+import { compileMechanical } from "../src/compile/mechanical.js";
+import { DEFAULT_RISK_PROFILE_PATH, loadRiskProfile } from "../src/compile/risk-profile.js";
+import type { TraceEntry } from "../src/discover/executor.js";
+
+const arg = (name: string, fallback?: string): string => {
+  const i = process.argv.indexOf(`--${name}`);
+  const value = i >= 0 ? process.argv[i + 1] : undefined;
+  if (value === undefined || value.startsWith("--")) {
+    if (fallback !== undefined) return fallback;
+    console.error(`recompile: missing required --${name}`);
+    process.exit(2);
+  }
+  return value;
+};
+
+/**
+ * Provenance comes from the run's own manifest, never from this invocation.
+ *
+ * A recompile happens later, on a different machine, possibly by someone else.
+ * Stamping `discoveredAt` with today's clock or the model with "unknown" would
+ * make the artifact claim a provenance it does not have, so both are read back
+ * from the run that actually produced the trace.
+ */
+interface RunManifest {
+  readonly startedAt?: string;
+  readonly model?: { readonly provider?: string };
+  readonly capability?: { readonly id?: string; readonly version?: string };
+  readonly tenant?: string;
+}
+
+const main = (): void => {
+  const runDir = arg("run");
+  const tracePath = path.join(runDir, "trace.jsonl");
+  const manifestPath = path.join(runDir, "manifest.json");
+
+  let trace: TraceEntry[];
+  try {
+    trace = readFileSync(tracePath, "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as TraceEntry);
+  } catch (e) {
+    console.error(`recompile: cannot read ${tracePath} — ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(2);
+  }
+
+  let manifest: RunManifest = {};
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
+  } catch {
+    // A trace without its manifest is still compilable; the provenance is just
+    // thinner, and saying so beats inventing the fields.
+    console.error(`recompile: no readable manifest beside the trace — provenance will be incomplete`);
+  }
+
+  const binding = Binding.parse(JSON.parse(readFileSync(arg("binding"), "utf8")));
+  const riskProfile = loadRiskProfile(arg("risk-profile", DEFAULT_RISK_PROFILE_PATH));
+  const capabilityId = arg("capability-id", manifest.capability?.id ?? "msc.capability");
+  const version = arg("version", manifest.capability?.version ?? "1.0.0");
+  const out = arg("out", path.join(runDir, "capability.json"));
+
+  console.log(`recompile: ${trace.length} trace entr(ies) from ${tracePath}`);
+
+  let draft: Record<string, unknown>;
+  try {
+    draft = compileMechanical({
+      trace,
+      goal: arg("goal"),
+      capabilityId,
+      version,
+      app: "MERIDIAN MSC",
+      model: manifest.model?.provider ?? "(unrecorded)",
+      appProfileVersion: "meridian-msc@4.2",
+      discoveredAt: manifest.startedAt ?? "(unrecorded)",
+      binding,
+      riskProfile,
+    });
+  } catch (e) {
+    // The same refusal the discovery CLI prints, from the same code path. Exit 3
+    // distinguishes "the compiler declined" from "this script was called wrong".
+    console.error(`recompile: REFUSED — ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(3);
+  }
+
+  const parsed = safeParseCapability(draft);
+  if (!parsed.success) {
+    console.error("recompile: the compiled artifact FAILED validation:");
+    for (const i of parsed.error.issues) console.error(`  ${i.path.join(".")}: ${i.message}`);
+    process.exit(1);
+  }
+
+  writeFileSync(out, `${JSON.stringify(parsed.data, null, 1)}\n`, "utf8");
+  const steps = parsed.data.plan.steps.map((s) => `${s.ref}:${s.action}/${s.risk}`).join(" ");
+  console.log(`recompile: wrote ${out}`);
+  console.log(`  ${capabilityId}@${version}  risk=${parsed.data.contract.risk}  steps: ${steps}`);
+};
+
+main();

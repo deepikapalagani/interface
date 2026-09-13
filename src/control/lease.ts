@@ -7,20 +7,37 @@
  * is that an action by the wrong actor FAILS.
  *
  * This object is ONE enforcement point, consulted at the single surface
- * chokepoint (`GatedSurface.act`), which asks it three independent questions
- * before any action is issued:
+ * chokepoint (`GatedSurface.act`), which asks it three questions before any
+ * action is issued:
  *
  *   1. `assertAutomation` — does automation hold the lease at all?
  *   2. `holder`           — does the caller's own view of control agree with it?
  *   3. `isCurrent`        — was this action built in the current era, or before a
  *                           handoff that has happened since?
  *
- * Three rather than one because they catch different defects: (1) a run that kept
- * going after ceding, (2) a caller reasoning from a stale view of who is driving,
- * (3) an action that was legal when it was BUILT and is not legal now. The epoch
- * is what makes a stale holder harmless: an action captured before a handoff
- * cannot be issued into the session afterwards, because its epoch no longer
- * matches.
+ * ONE OF THE THREE IS LIVE; THE OTHER TWO ARE TRUE BY CONSTRUCTION. Said here
+ * because the obvious reading — three independent enforcement points catching
+ * three distinct defects — overstates what is actually running, and
+ * `src/surface/gated.ts:83-87` already concedes it in place. Only (1) has a
+ * reachable violator: a run that kept going after ceding. Checks (2) and (3)
+ * cannot be violated by any caller in this repo, because every production caller
+ * builds its `ActionContext` from this lease and calls `act()` with no
+ * suspension point in between — `src/replay/executor.ts` reads `lease.holder`
+ * and `lease.epoch` into the context and awaits `surface.act` on the next
+ * statement, and the discovery executor evaluates its `actor()`/`epoch()` thunks
+ * inline at the call site. The only contexts that trip them are the hand-built
+ * literals in `tests/gate.test.ts`.
+ *
+ * That is defence-in-depth, and it is worth keeping for a reason the code cannot
+ * state on its own: it makes the property true BY CONSTRUCTION rather than by an
+ * argument about statement ordering, so a second caller — a concurrent worker, a
+ * queue, an embedder driving `replay()` as a library — violates it loudly
+ * instead of silently. What it is NOT is evidence that two actors have ever been
+ * caught racing here.
+ *
+ * The epoch is what makes a stale holder harmless: an action captured before a
+ * handoff cannot be issued into the session afterwards, because its epoch no
+ * longer matches.
  *
  * ── THE THIRD POINT, WHICH IS NOT BUILT ─────────────────────────────────────
  *

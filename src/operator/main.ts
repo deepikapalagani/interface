@@ -85,8 +85,31 @@ const toOutcome = (signal: HandbackSignal): HandoffOutcome => {
 const esc = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+/**
+ * The capture's caption, derived from the MASK COUNT that travelled with the
+ * bytes rather than from a constant.
+ *
+ * This used to read "(masked at capture)" unconditionally. It was false for
+ * every artifact shipped in this repo: the executor masks
+ * `targets.filter(t => t.nameMayContainPii)`, every shipped target sets that
+ * flag false, so the list is empty, `page.screenshot({mask: []})` returns a
+ * fully unredacted capture, and the operator was shown a PAN-bearing servicing
+ * screen under a label promising it had been masked. The escalation log line
+ * beside it said `masked:0` the whole time, so the console was the only surface
+ * that disagreed with the measurement.
+ *
+ * It now says what the count says. Zero is reported as UNMASKED, in the same
+ * red as the pause banner, because the honest reading of a zero here is "nothing
+ * on this capability was declared as PII-bearing", not "there was nothing to
+ * hide".
+ */
+const shotCaption = (maskedRegions: number): string =>
+  maskedRegions > 0
+    ? `<b>LIVE SCREEN</b> <span style="color:#555">(${maskedRegions} region(s) blacked out at capture)</span>`
+    : `<b>LIVE SCREEN</b> <span style="color:#7E1416">(UNMASKED — this capability declared no PII-bearing target, so nothing was blacked out)</span>`;
+
 /** Two buttons and a body of context. Deliberately one function and no templating engine. */
-const render = (request: InterventionRequest | null, hasShot: boolean, attached: boolean): string => {
+const render = (request: InterventionRequest | null, attached: boolean): string => {
   if (request === null) {
     return `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2">
 <title>OPERATOR CONSOLE — IDLE</title>
@@ -132,8 +155,12 @@ ${attached ? "" : `<p style="color:#7E1416"><b>NO LIVE RUN ATTACHED.</b> The con
   the same live session, with the run's own form state intact. Then press HAND BACK and the run resumes
   from this step's checkpoint. Press ABORT if the step should not be performed at all.</p>
 
-  ${hasShot ? `<p style="margin:14px 0 4px;color:#555"><b>LIVE SCREEN</b> (masked at capture)</p>
-  <img src="/screenshot.png" alt="masked screenshot of the live session" style="max-width:100%;border:1px solid #ccc">` : ""}
+  ${
+    request.screenshot === undefined
+      ? ""
+      : `<p style="margin:14px 0 4px;color:#555">${shotCaption(request.screenshot.maskedRegions)}</p>
+  <img src="/screenshot.png" alt="screenshot of the live session" style="max-width:100%;border:1px solid #ccc">`
+  }
 
   <p style="margin:14px 0 4px;color:#555"><b>LIVE SCREEN TEXT</b> (redacted)</p>
   <pre style="background:#f7f7f7;border:1px solid #ddd;padding:10px;max-height:260px;overflow:auto;white-space:pre-wrap">${esc(safeText)}</pre>
@@ -311,7 +338,7 @@ export class OperatorConsole implements EscalationTransport {
       res.end(done(`TURN ENDED — ${this.lastOutcome}`));
       return;
     }
-    res.end(render(this.request, this.request?.screenshot !== undefined, this.opts.channel !== null));
+    res.end(render(this.request, this.opts.channel !== null));
   }
 }
 

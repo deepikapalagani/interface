@@ -7,7 +7,7 @@
  * silently: it is data, nothing imports it, and a typo in a predicate would only
  * surface as a confusing runtime failure much later.
  *
- * So it is pinned here. The fixture has to survive all eight schema refinements,
+ * So it is pinned here. The fixture has to survive all twelve schema refinements,
  * and its symbols have to resolve to the tenant literals the mock actually
  * renders — which is the same round trip a discovered artifact will make.
  */
@@ -22,7 +22,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const load = (name: string): unknown => JSON.parse(readFileSync(path.join(here, "fixtures", name), "utf8"));
 
 describe("hand-authored fixtures", () => {
-  it("the lookup capability survives every schema refinement", () => {
+  it("the lookup capability survives every one of the twelve schema refinements", () => {
     const parsed = safeParseCapability(load("lookup@1.0.0.json"));
     if (!parsed.success) {
       // Print the actual issues — a bare `false` here would be a miserable failure.

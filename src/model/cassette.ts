@@ -6,14 +6,19 @@
  * REAL loop drives the REAL browser against the REAL mock with no API key and no
  * cost. Only the model is substituted.
  *
- * It is a labelled fake, not a simulation. The distinction that keeps it honest
- * is the check below: each turn asserts that the tool result being handed back
- * matches the one recorded at that point. If the surface has changed — different
- * markup, a renamed field, a slower screen — the cassette fails loudly instead of
- * quietly replaying a conversation that no longer corresponds to reality.
+ * It is a labelled fake, not a simulation, and the check below is what keeps it
+ * honest — at SCREEN LEVEL, which is the scope worth stating precisely because
+ * the previous version of this sentence claimed the whole tool result. Each turn
+ * extracts the screen id from the result this run just produced and compares it
+ * with the screen id the recording saw at the same point (`screenOf`, then the
+ * comparison in `converse`). A run that has walked onto a different screen stops
+ * loudly. A renamed field, a removed control, a changed row count or different
+ * markup on the SAME screen all pass — this guard does not see them.
  *
- * Without that check a cassette run would pass forever regardless of the code it
- * is supposed to be exercising, which is worse than having no offline path.
+ * That is still the difference between an offline path that proves something and
+ * one that passes forever regardless of the code it is supposed to exercise: the
+ * flows here are screen-to-screen walks, so a break in targeting shows up as a
+ * screen that never advances. It is not a general drift detector.
  */
 import type { ConverseOptions, ConverseResponse, ModelProvider, Turn, Usage } from "./provider.js";
 
@@ -102,9 +107,4 @@ export class CassetteProvider implements ModelProvider {
     };
   }
 
-  async parseJson(): Promise<{ value: unknown; usage: Usage }> {
-    // Compilation's inference pass has nothing recorded to replay, so the caller
-    // falls back to the mechanical result — which is the honest behaviour.
-    return { value: {}, usage: NO_USAGE };
-  }
 }

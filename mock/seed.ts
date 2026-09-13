@@ -57,7 +57,16 @@ export interface FaultSpec {
   readonly name: FaultName;
   /** The exact condition on which it fires. */
   readonly fires: string;
-  /** What a run against it is supposed to demonstrate. */
+  /**
+   * What the APP does, and what that condition is an instance of.
+   *
+   * Deliberately NOT what replay returns. A mock fixture asserting engine
+   * behaviour is a second copy of a claim it cannot check, and this file held
+   * exactly that: it promised `broadcast` yielded a run that "continues" while
+   * the engine returned `postcondition_failed`. Expectations about the REPLAY
+   * outcome live in `scripts/fault.ts`, which is the only place that runs a
+   * replay and compares.
+   */
   readonly proves: string;
 }
 
@@ -65,17 +74,17 @@ export const FAULTS: readonly FaultSpec[] = [
   {
     name: "broadcast",
     fires: "the next CARD SERVICES render; queues a native alert() after load",
-    proves: "a RECOVERABLE condition — the declared dismiss_dialog rule clears it and the run continues",
+    proves: "a known, dismissible interstitial arriving mid-flow — the condition §3.3's RECOVERABLE class is defined over",
   },
   {
     name: "confirm_submit",
     fires: "the next CARD SERVICES render; the card form gains an onsubmit confirm()",
-    proves: "an UNDECLARED dialog blocks the submit — nothing is committed, and the audit trail's silence proves it",
+    proves: "an UNDECLARED dialog on the submit path; the app's audit trail staying empty is the independent record that nothing committed",
   },
   {
     name: "abend_after_commit",
     fires: "the next card action that would otherwise succeed; commits, then renders SYS0500",
-    proves: "the dangerous direction — the change LANDED but the automation never saw the confirmation, so the result is reconcile_required rather than a claimed outcome",
+    proves: "the dangerous direction — the change LANDS and the caller is then shown a screen that cannot say so, leaving the audit trail the only record of the truth",
   },
 ];
 

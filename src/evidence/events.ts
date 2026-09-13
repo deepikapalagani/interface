@@ -55,7 +55,19 @@ export interface LogEvent {
   /** Expected/observed pair where one applies — the debuggable half of §3.3-g. */
   readonly expected?: string;
   readonly observed?: string;
-  /** Set when a value on this line passed through the redactor. */
+  /**
+   * True when redaction ACTUALLY CHANGED this line on its way to disk.
+   *
+   * STAMPED BY THE WRITER, NOT BY THIS SEQUENCER, and that is the only place it
+   * can honestly be set: the sequencer holds the line in memory, where nothing
+   * has been masked yet. `EvidenceWriter.event()` redacts, compares the
+   * serialised forms, and sets this only if they differ — so the flag means "a
+   * value on this line was masked", never "a redactor was in the code path".
+   *
+   * It had ZERO producers before that: a field on the graded evidence envelope
+   * that could never be true, which a reviewer would read as a redaction
+   * indicator.
+   */
   readonly redacted?: boolean;
   readonly detail?: Readonly<Record<string, unknown>>;
 }
@@ -65,6 +77,20 @@ export interface LogContext {
   readonly phase: Phase;
   readonly now: () => string;
   readonly controlOwner: () => ControlOwner;
+  /**
+   * Where each line goes THE MOMENT IT IS EMITTED, when a caller wants that.
+   *
+   * `evidence/log.ts` says JSONL was chosen "because a run that crashes half way
+   * should still leave readable evidence up to the point it stopped", and
+   * `event()` describes itself as "called as the run goes". Neither was true in
+   * production: the only caller of `event()` was the bulk `events()` flush, and
+   * both CLIs called that ONCE, after the run had already returned. A throw
+   * anywhere inside `replay()` lost every line rather than merely the last.
+   *
+   * OPTIONAL, because the sequencer stays pure and I/O-free for the tests that
+   * assert its SHAPE without touching a filesystem. Wiring it is the CLI's job.
+   */
+  readonly sink?: (event: LogEvent) => void;
 }
 
 /**
@@ -127,6 +153,9 @@ export class EventSequencer {
       ...(extra.detail === undefined ? {} : { detail: extra.detail }),
     };
     this.events.push(line);
+    // Appended as the run goes when a sink is wired, which is what makes the
+    // crash-resilience claim in `evidence/log.ts` true rather than aspirational.
+    this.ctx.sink?.(line);
     return line;
   }
 

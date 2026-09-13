@@ -36,10 +36,17 @@
  * would leave the flagship capability (`msc.card.set_status`) unable to tell
  * which card it was asked to freeze — safety that breaks the thing it protects.
  *
- * ── TWO SHAPES ARE SHARED, NOT INVENTED ────────────────────────────────────
+ * ── TWO SHAPES, ONE DEFINITION, THREE JOBS ─────────────────────────────────
  *
- * Both from measurements already recorded in `scripts/verify-evidence.ts`, so
- * the detector and the redactor cannot disagree about what a leak looks like:
+ * `PII_SHAPES` below is the single list, and everything that asks "does this look
+ * like PII?" asks it: `redactText` masks with it, `hasPiiShape` answers for the
+ * compiler (which refuses to record a dialog message carrying one) and for
+ * minting (which flags a target recorded on a screen that renders one). A second
+ * copy of a shape is how a value ends up masked by one rule and flagged by
+ * another. `scripts/verify-evidence.ts` holds the same two shapes as the graded
+ * scan, and `tests/redact.test.ts` pins this module's output against them.
+ *
+ * Both shapes are measurements rather than inventions:
  *
  *   - The card shape is GUARDED, `(?<![\w-])\d{13,19}(?![\w-])`. Measured over
  *     the committed evidence: the bare `\b\d{13,19}\b` form matches 24 provider
@@ -57,19 +64,33 @@
  *     rendered without separators passes through untouched. On this surface it
  *     never is, and the separator is what carries the meaning.
  *
- * ── WHAT THIS FILE DOES NOT COVER ──────────────────────────────────────────
+ * ── WHERE IT IS APPLIED, AND WHERE IT IS NOT ───────────────────────────────
  *
- * Redaction has four boundaries and this module owns two of them (the model
- * context, and the discovery evidence files). The other two are enforced
- * elsewhere and are named here so the gap is visible rather than assumed:
- * the ARTIFACT is protected by the schema's own refinement — a PII-shaped
- * literal must be a `{{param}}` — and a SCREENSHOT is masked at capture time by
- * `PlaywrightSurface`, because a captured PNG already contains the PAN.
+ * This module is a POLICY, not an enforcement point: it masks whatever it is
+ * given, and each writer decides to give it something. The call sites are
+ * therefore named rather than assumed, because "the redactor exists" and "this
+ * file is redacted" are different claims:
  *
- * Still open, and not fixable from here: `replay/predicate.ts` writes a read
- * value into an event's `observed` field, so a capability that reads an SSN
- * field would log it. That producer, and `LogEvent.redacted`, live behind the
- * event writer rather than behind this module.
+ *   - the MODEL CONTEXT — `surface/serialize.ts` runs every rendered line
+ *     through `redactText` by default;
+ *   - BOTH DISCOVERY EVIDENCE FILES (the executed trace and the raw model
+ *     conversation) — `evidence/discovery-log.ts` redacts each on the way out.
+ *     Their filenames are deliberately not spelled here: this module is reachable
+ *     from the replay entry points, and `scripts/verify-no-llm.ts` forbids that
+ *     graph from so much as MENTIONING the conversation file — a raw substring
+ *     scan, comments included. Weakening the checker to accommodate a comment
+ *     would spend the one mechanism protecting the submission's central claim;
+ *   - `events.jsonl` and `handoff.jsonl` — `evidence/log.ts` redacts every event
+ *     as it appends it, and every handoff record it writes;
+ *   - the OPERATOR CONSOLE and the ESCALATION RECORD — `operator/main.ts` and
+ *     `replay/executor.ts` redact the observed screen text a person is shown.
+ *
+ * Two boundaries are enforced by mechanisms other than this one, and are listed
+ * so the coverage is legible in one place: the ARTIFACT is protected by the
+ * schema's own refinement — a PII-shaped literal must be a `{{param}}` — plus
+ * the compiler's refusal to record a PII-shaped dialog message; and a SCREENSHOT
+ * is masked at CAPTURE time by `PlaywrightSurface`, because a captured PNG
+ * already contains the PAN and no string rule can reach it afterwards.
  */
 
 import { readFileSync } from "node:fs";
@@ -93,10 +114,34 @@ interface Rule {
 /** Keep the trailing four, mask the rest — the form a servicing screen renders. */
 const keepLast4 = (digits: string): string => `${"*".repeat(Math.max(0, digits.length - 4))}${digits.slice(-4)}`;
 
+const SSN_SHAPE = /(?<![\d-])(\d{3})-(\d{2})-(\d{4})(?![\d-])/;
+const PAN_SHAPE = /(?<![\w-])(\d{13,19})(?![\w-])/;
+
+/**
+ * THE ONE DEFINITION OF "this looks like PII".
+ *
+ * Not global, so `.test()` is stateless; `everywhere()` derives the global form
+ * the masking rules need from the same source. Anything that wants to DETECT
+ * rather than mask uses `hasPiiShape` / `piiShapeIn` below, so a third spelling
+ * of these shapes cannot appear.
+ */
+export const PII_SHAPES: readonly { readonly what: string; readonly re: RegExp }[] = [
+  { what: "a card-number-shaped literal", re: PAN_SHAPE },
+  { what: "an SSN-shaped literal", re: SSN_SHAPE },
+];
+
+/** Names WHICH shape matched, because a refusal that cannot say why is unactionable. */
+export const piiShapeIn = (text: string): string | null =>
+  PII_SHAPES.find((shape) => shape.re.test(text))?.what ?? null;
+
+export const hasPiiShape = (text: string): boolean => piiShapeIn(text) !== null;
+
+const everywhere = (re: RegExp): RegExp => new RegExp(re.source, `${re.flags}g`);
+
 const RULES: readonly Rule[] = [
   // Ordered first so the hyphens are consumed before any digit-run rule sees them.
-  { re: /(?<![\d-])(\d{3})-(\d{2})-(\d{4})(?![\d-])/g, mask: (_m, _a, _b, last4) => `***-**-${last4}` },
-  { re: /(?<![\w-])(\d{13,19})(?![\w-])/g, mask: (_m, pan) => keepLast4(pan) },
+  { re: everywhere(SSN_SHAPE), mask: (_m, _a, _b, last4) => `***-**-${last4}` },
+  { re: everywhere(PAN_SHAPE), mask: (_m, pan) => keepLast4(pan) },
   { re: /\b(bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, mask: (_m, prefix) => `${prefix}${CREDENTIAL_MASK}` },
   {
     re: /\b(api[_-]?key|access[_-]?token|secret)(["' :=]+)[A-Za-z0-9._~+/=-]{16,}/gi,

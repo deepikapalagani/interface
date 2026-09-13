@@ -23,7 +23,10 @@
  * No model is involved. No key is needed. This runs in CI.
  */
 import type { Server } from "node:http";
-import { readFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -39,21 +42,22 @@ import { BoundSurface } from "../src/surface/bound.js";
 import { GatedSurface } from "../src/surface/gated.js";
 import { PlaywrightSurface } from "../src/surface/playwright.js";
 
-const PORT = 7108;
-const ENTRY = `http://localhost:${PORT}/`;
+/**
+ * PORT 0 — the OS picks a free one.
+ *
+ * This suite used to bind a FIXED 7108, with no `error` handler on `listen`, so
+ * on a machine where anything already held that port the `beforeAll` hung until
+ * its timeout and vitest reported every test in the file as SKIPPED rather than
+ * failed. Green on a clean machine, silently absent on a busy one — and the
+ * repo's own scripts already avoid fixed ports for exactly this reason
+ * (`scripts/demo.ts` binds 0, `scripts/verify-determinism.ts` has `freePort()`).
+ * Nothing here needs a predictable port: the entry URL is derived after binding.
+ */
 const here = path.dirname(fileURLToPath(import.meta.url));
 const load = (name: string): unknown => JSON.parse(readFileSync(path.join(here, "fixtures", name), "utf8"));
 
-const policy = PolicyDocument.parse({
-  version: "1.0.0",
-  allowedOrigins: [ENTRY.replace(/\/$/, "")],
-  deniedRoutes: ["/__admin"],
-  allowedActions: ["navigate", "click", "fill", "press", "dismiss_dialog"],
-  screenRules: [],
-  riskHandling: { read_only: "allow", reversible: "allow", irreversible: "confirm" },
-  caps: { maxSteps: 40, maxRunSeconds: 60 },
-});
-
+let ENTRY: string;
+let policy: PolicyDocument;
 let server: Server;
 let capability: Capability;
 const binding = Binding.parse(load("fcu@4.2.json"));
@@ -87,7 +91,17 @@ const run = async (memberId: string) => {
 beforeAll(async () => {
   capability = parseCapability(load("lookup@1.0.0.json"));
   server = createServer(tenantA);
-  await new Promise<void>((resolve) => server.listen(PORT, resolve));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  ENTRY = `http://localhost:${(server.address() as AddressInfo).port}/`;
+  policy = PolicyDocument.parse({
+    version: "1.0.0",
+    allowedOrigins: [ENTRY.replace(/\/$/, "")],
+    deniedRoutes: ["/__admin"],
+    allowedActions: ["navigate", "click", "fill", "press", "dismiss_dialog"],
+    screenRules: [],
+    riskHandling: { read_only: "allow", reversible: "allow", irreversible: "confirm" },
+    caps: { maxSteps: 40, maxRunSeconds: 60 },
+  });
 }, 60000);
 
 afterAll(() => {
@@ -118,6 +132,55 @@ describe("replay against the real mock", () => {
     expect(result.code).toBe("MEMBER_NOT_FOUND");
     expect(result.matchedSignal).toContain("MSG 0071");
   }, 60000);
+
+  /**
+   * §3.4-a THROUGH THE CLI, AND BEFORE A BROWSER EXISTS.
+   *
+   * `validatePlanOrigins` was written for exactly this and had NO caller, so an
+   * off-allowlist `--target` used to launch Chromium, navigate to the forbidden
+   * origin and render it — only the first ACTION was refused, long after the
+   * page had been fetched. "We loaded it and then declined to click" is not the
+   * guarantee an allowlist makes.
+   *
+   * Spawned as the real CLI with NO MOCK RUNNING, which is the point: the
+   * refusal has to be the allowlist talking, not a navigation error. A run that
+   * got as far as trying would fail with a connection or timeout message
+   * instead, so the assertion is on WHICH failure this is.
+   */
+  it("refuses an off-allowlist target before launching a browser, and writes no evidence", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "replay-allowlist-"));
+    try {
+      const result = spawnSync(
+        path.join(here, "..", "node_modules", ".bin", "tsx"),
+        [
+          path.join(here, "..", "src", "replay", "main.ts"),
+          "--capability", path.join(here, "fixtures", "lookup@1.0.0.json"),
+          "--binding", path.join(here, "fixtures", "fcu@4.2.json"),
+          // allowedOrigins is ["http://localhost:7101"]; example.com is not it.
+          "--policy", path.join(here, "fixtures", "policy-escalate.json"),
+          "--target", "http://example.com/",
+          "--evidence", root,
+          "--run-id", "allowlist-refused",
+          "--input", "member_id=400200101",
+        ],
+        { cwd: path.join(here, ".."), encoding: "utf8", timeout: 120_000 },
+      );
+
+      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+      // Exit 2 is the bad-invocation code `arg()` already uses: the caller asked
+      // for something the policy forbids, which is not a run that failed.
+      expect(result.status).toBe(2);
+      expect(output).toContain("not on this policy's allowlist");
+      expect(output).toContain("no browser was launched");
+      // The refusal is the allowlist's, not the network's.
+      expect(output).not.toMatch(/net::ERR|Timeout .* exceeded|page\.goto/);
+      // And nothing was created: refusing before the run means refusing before
+      // the evidence directory, so there is no half-run to mistake for one.
+      expect(existsSync(path.join(root, "allowlist-refused"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it("rejects a malformed input without touching the browser at all", async () => {
     // Eight digits; the capability's pattern demands nine.

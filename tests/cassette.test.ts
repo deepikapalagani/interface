@@ -16,7 +16,7 @@ import { describe, expect, it } from "vitest";
 import { CassetteDiverged, CassetteProvider } from "../src/model/cassette.js";
 import type { ConverseOptions, Turn } from "../src/model/provider.js";
 
-const OPTS: ConverseOptions = { tools: [], toolChoice: "required", maxTokens: 512, reasoning: false };
+const OPTS: ConverseOptions = { tools: [], toolChoice: "required", maxTokens: 512 };
 
 const call = (id: string, name: string) => ({ id, name, args: { ref: "f2e16" } });
 
@@ -122,5 +122,27 @@ describe("cassette", () => {
     await expect(
       c.converse([{ role: "tool", callId: "c1", content: "SCREEN: SEC0403\nCONTROLS (0):" }], OPTS),
     ).rejects.toBeInstanceOf(CassetteDiverged);
+  });
+
+  /**
+   * THE SCOPE OF THE GUARD, PINNED SO THE HEADER CANNOT OVERSTATE IT AGAIN.
+   *
+   * The module header used to say each turn asserts "the tool result being handed
+   * back matches the one recorded at that point... a renamed field, a slower
+   * screen" — while the implementation compares one screen token. This test is
+   * that difference made explicit: same screen, different everything else, and the
+   * cassette keeps going. It is a screen-level drift detector, and the header now
+   * says so.
+   */
+  it("does NOT detect drift within a screen — different controls on the same screen pass", async () => {
+    const c = new CassetteProvider(recorded);
+    await c.converse([{ role: "user", content: "start" }], OPTS);
+
+    const next = await c.converse(
+      [{ role: "tool", callId: "c1", content: "SCREEN: MEMBER_SEARCH\nCONTROLS (0):\n  (every control renamed or gone)" }],
+      OPTS,
+    );
+
+    expect(next.toolCalls[0]?.name).toBe("click");
   });
 });

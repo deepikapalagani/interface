@@ -59,9 +59,21 @@ export const navFrame = (t: TenantConfig): string =>
 <input type="text" name="${esc(t.fields["MEMBER_ID"] ?? "MBRNO")}" size="8" maxlength="10"></form><br>
 INQUIRY<br>ACCOUNTS<br>CARD SERVICES<br>STOP PAYMENT<br></font>`);
 
+/**
+ * SEC0100 — sign-on.
+ *
+ * The form posted to `/signon`, which `main.ts` does not route, so the only
+ * control on the screen was a dead end onto the 404 render. Nothing in the repo
+ * navigates here, so this was never a blocked flow — it is hygiene, and
+ * tests/mock-app.test.ts now pins every screen's form action to a routed path so
+ * the next dead action fails a test rather than waiting to be noticed.
+ *
+ * `/screen/menu` by GET: the app's other forms are GET, and the menu is where a
+ * sign-on lands. No credential is checked, because the mock holds none.
+ */
 export const signOn = (t: TenantConfig, clock: string): string =>
   page(`${chrome(t, t.screenIds["SIGN_ON"] ?? "SEC0100", "OPERATOR SIGN-ON", clock)}
-<form action="/signon" method="post"><table border="0" cellpadding="3">
+<form action="/screen/menu" method="get"><table border="0" cellpadding="3">
 ${labelledField("OPERATOR ID", t.fields["OPERATOR_ID"] ?? "OPRID", 12)}
 <tr><td><font face="Arial" size="2">PASSCODE</font></td>
 <td><input type="password" name="${esc(t.fields["PASSCODE"] ?? "PASSWD")}" size="12"></td></tr>

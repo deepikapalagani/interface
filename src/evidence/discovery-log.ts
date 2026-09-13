@@ -11,14 +11,20 @@
  * would have spent the one mechanism protecting the submission's most weighted
  * claim in order to keep a convenience, so the architecture moved instead.
  *
- * BOTH FILES ARE REDACTED ON THE WAY OUT (§3.4-e), and that is not belt-and-
- * braces layered on the model-facing serialiser. The serialiser governs only
- * what the model is SHOWN. These two files also hold what the model SAID, the
- * provider's raw payload for every turn, and the literals the run typed — so a
- * model that reads `SSN 900-55-0101` off MBR0400 and quotes it back in its own
- * prose lands it in the record by a path the serialiser never touches. This is
- * the last boundary before bytes hit disk, which is why the policy is applied
- * here rather than trusted to have happened upstream.
+ * THE TWO FILES THIS CLASS WRITES — `trace.jsonl` and `transcript.jsonl` — ARE
+ * REDACTED ON THE WAY OUT (§3.4-e), and that is not belt-and-braces layered on
+ * the model-facing serialiser. The serialiser governs only what the model is
+ * SHOWN. These two files also hold what the model SAID, the provider's raw
+ * payload for every turn, and the literals the run typed — so a model that reads
+ * `SSN 900-55-0101` off MBR0400 and quotes it back in its own prose lands it in
+ * the record by a path the serialiser never touches. This is the last boundary
+ * before those bytes hit disk, which is why the policy is applied here rather
+ * than trusted to have happened upstream.
+ *
+ * The run's other files are not this class's to speak for: `events.jsonl`,
+ * `manifest.json` and `capability.json` are written by `EvidenceWriter`, and
+ * `safety/redact.ts` names which boundaries apply the policy and which rely on
+ * another mechanism.
  *
  * Applied to a COPY, deliberately: the discovery CLI hands the same trace array
  * to this writer and to the compiler, so redacting in place would put a masked

@@ -19,6 +19,7 @@ import {
   BindingChecked,
   UnboundSymbol,
   canonicalField,
+  canonicalFrame,
   canonicalLabel,
   canonicalScreen,
   resolve,
@@ -105,6 +106,45 @@ describe("binding", () => {
   it("rewrites the frame path for a tenant that renamed its content frame", () => {
     expect(resolveTarget(memberIdTarget, fcu).framePath[0]?.name).toBe("content");
     expect(resolveTarget(memberIdTarget, hcu).framePath[0]?.name).toBe("main");
+  });
+
+  /**
+   * THE NAV FRAME, WHICH HAD NO READER AT ALL.
+   *
+   * `frames.nav` is a REQUIRED field of the Binding schema, and every named hop
+   * used to be rewritten to `frames.content` unconditionally — so a target
+   * recorded in the navigation frame resolved against the content frame with no
+   * error. On this surface that is the exact collision the frame hop exists to
+   * break: the nav frame carries a quick-lookup box using the SAME field name as
+   * the member-id field.
+   */
+  it("resolves a NAV-frame target against the nav frame, not the content frame", () => {
+    const quickLookup: TargetDescriptor = { ...memberIdTarget, framePath: [{ name: "nav" }] };
+
+    expect(resolveTarget(quickLookup, fcu).framePath[0]?.name).toBe("nav");
+    expect(resolveTarget(quickLookup, hcu).framePath[0]?.name).toBe("sidebar");
+  });
+
+  it("a frame role no binding names is DRIFT, not a silent fallback to content", () => {
+    const elsewhere: TargetDescriptor = { ...memberIdTarget, framePath: [{ name: "sidebar" }] };
+    try {
+      resolveTarget(elsewhere, fcu);
+      expect.unreachable("should have refused");
+    } catch (e) {
+      expect(e).toBeInstanceOf(UnboundSymbol);
+      expect((e as UnboundSymbol).kind).toBe("frame");
+      expect((e as UnboundSymbol).symbol).toBe("sidebar");
+    }
+  });
+
+  it("maps a tenant's own frame NAME back to the role it plays — what the compiler records", () => {
+    expect(canonicalFrame(fcu, "content")).toBe("content");
+    expect(canonicalFrame(fcu, "nav")).toBe("nav");
+    expect(canonicalFrame(hcu, "main")).toBe("content");
+    expect(canonicalFrame(hcu, "sidebar")).toBe("nav");
+    // A frame this tenant does not render is not guessed at.
+    expect(canonicalFrame(fcu, "main")).toBeNull();
+    expect(canonicalFrame(fcu, null)).toBeNull();
   });
 
   it("translates back: the surface sees a literal, predicates assert a symbol", () => {

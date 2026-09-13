@@ -548,6 +548,82 @@ describe("the evidence of a control transfer", () => {
   });
 });
 
+describe("when the driver lock cannot be armed", () => {
+  /**
+   * THE UNGUARDED WINDOW, closed.
+   *
+   * `lease.cede()` runs before the driver lock is armed, so for as long as
+   * arming sat OUTSIDE the try that restores control, a throw there escaped
+   * `runEscalation` with the lease still on "human", no `handoff.returned` line,
+   * and the emitted-versus-journalled reconciliation never reached — an audit of
+   * control showing a cede with no matching return.
+   *
+   * Not a hypothetical failure to simulate: `beginHumanTurn()` awaits
+   * `ensurePlumbing()`, and `exposeBinding`/`addInitScript` reject on a closed or
+   * torn-down context. Against the real driver, closing the context and then
+   * calling it throws `browserContext.exposeBinding: Target page, context or
+   * browser has been closed`.
+   *
+   * What must survive is the property the catch block claims: the session never
+   * stays stuck on a human who is not there.
+   */
+  it("RESTORES control and journals the failure instead of stranding the lease on the human", async () => {
+    const s = stack(AT_CARD_SERVICES);
+    const boom = new Error("browserContext.exposeBinding: Target page, context or browser has been closed");
+
+    const draft = {
+      runId: "arming-failure",
+      capability: { id: "msc.card.freeze", version: "1.0.0", goal: "Freeze the member's card and confirm it." },
+      stepRef: "s01",
+      stepTitle: "Press FREEZE on card services",
+      action: "click",
+      effectiveRisk: "irreversible",
+      reason: "irreversible actions require a human decision",
+      ruleId: "risk.confirm:irreversible",
+      screen: "CARD_SERVICES",
+      location: AT_CARD_SERVICES.location,
+      observedText: AT_CARD_SERVICES.text,
+    };
+
+    let endCalled = false;
+    const raised = await runEscalation(draft, {
+      lease: s.lease,
+      log: s.log,
+      ttlMs: 30_000,
+      now: s.now,
+      transport: { async raise() { throw new Error("the transport must never be reached"); } },
+      session: {
+        beginHumanTurn: () => Promise.reject(boom),
+        endHumanTurn: async () => { endCalled = true; },
+      },
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    // It still fails loudly — the caller is not told a turn happened.
+    expect(raised).toBe(boom);
+
+    // ...and control came BACK. This is the assertion that was false before.
+    expect(s.lease.holder).toBe("automation");
+    expect(s.lease.epoch).toBe(2);
+    expect(s.lease.transitions.map((t) => `${t.from}->${t.to}`)).toEqual(["automation->human", "human->automation"]);
+    expect(s.lease.transitions.at(-1)?.reason).toBe("escalation_timeout");
+
+    // The journal is two-sided, and the closing line names what actually failed:
+    // the lock would not arm, which is NOT a transport error.
+    const lines = handoffLines(s.log);
+    expect(lines.map((e) => e.event)).toEqual(["handoff.requested", "handoff.returned"]);
+    const returned = lines[1]?.why;
+    expect(returned?.as === "operator" && returned.disposition).toBe("arming_error");
+    expect(lines[1]?.observed).toContain("has been closed");
+
+    // The lock never armed, so there was nothing to clear; calling endHumanTurn
+    // would be clearing a turn that never began.
+    expect(endCalled).toBe(false);
+  });
+});
+
 describe("the run budget", () => {
   it("does not charge the human's minutes to the run, and dies at the deadline it actually hit", async () => {
     const seen: InterventionRequest[] = [];

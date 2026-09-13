@@ -14,14 +14,15 @@
     "mock:reset": "curl -fsS -X POST http://localhost:7101/__admin/reset && echo reset",
     "mock:fault": "tsx scripts/fault.ts",
     "discover": "tsx src/discover/main.ts",
+    "recompile": "tsx scripts/recompile.ts",
     "replay": "tsx src/replay/main.ts",
     "operator": "tsx src/operator/main.ts --port 7900",
     "demo": "tsx scripts/demo.ts",
     "demo:offline": "tsx scripts/demo.ts --provider cassette",
     "test": "vitest run",
-    "verify:no-llm": "tsx scripts/verify-no-llm.ts",
-    "verify:evidence": "tsx scripts/verify-evidence.ts",
-    "verify:determinism": "tsx scripts/verify-determinism.ts",
+    "verify:no-llm": "tsx scripts/verify-no-llm.ts --self-test",
+    "verify:evidence": "tsx scripts/verify-evidence.ts --self-test",
+    "verify:determinism": "tsx scripts/verify-determinism.ts --self-test",
     "verify": "npm run typecheck && npm run test && npm run verify:no-llm && npm run verify:evidence && npm run verify:determinism && npm run demo:offline"
   },
   "dependencies": {

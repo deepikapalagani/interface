@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest";
 import { freshState } from "../mock/seed.js";
 import { DiscoveryEvidenceWriter } from "../src/evidence/discovery-log.js";
 import { EvidenceWriter } from "../src/evidence/log.js";
-import { CREDENTIAL_MASK, redactDeep, redactText, redactTypedValue } from "../src/safety/redact.js";
+import { CREDENTIAL_MASK, hasPiiShape, piiShapeIn, redactDeep, redactText, redactTypedValue } from "../src/safety/redact.js";
 import { observationToText } from "../src/surface/serialize.js";
 import type { Observation } from "../src/surface/types.js";
 
@@ -140,6 +140,41 @@ describe("redaction policy", () => {
     const masked = redactText(`SSN ${rose.ssn} CARD ${firstCard.pan}`);
 
     for (const shape of LEAK_SHAPES) expect(masked).not.toMatch(shape.re);
+  });
+});
+
+/**
+ * ONE SHAPE DEFINITION, THREE CONSUMERS.
+ *
+ * `hasPiiShape` is the same list `redactText` masks with, exported so the
+ * compiler can refuse to record a PII-shaped dialog message in an artifact and
+ * minting can flag a target recorded on a screen that renders one. A second copy
+ * of a shape is how a value ends up masked by one rule and flagged by another —
+ * which is the defect the card-number guard was already fixed for once.
+ */
+describe("the PII-shape predicate", () => {
+  it("fires on exactly what the redactor masks, and names which shape it was", () => {
+    expect(piiShapeIn(`SSN ${rose.ssn}`)).toBe("an SSN-shaped literal");
+    expect(piiShapeIn(`CARD ${firstCard.pan}`)).toBe("a card-number-shaped literal");
+    expect(piiShapeIn(`MEMBER ${rose.id} ${rose.name} BRANCH ${rose.branch}`)).toBeNull();
+    // The tool-call id the guarded shape exists to leave alone.
+    expect(hasPiiShape("call_-7267060200698277786")).toBe(false);
+  });
+
+  it("agrees with the graded scan: anything it clears, the detector clears too", () => {
+    const screens = [
+      `MBR0400 MEMBER DETAIL\nMEMBER ${rose.id}\nSSN ${rose.ssn}\nCARD ${firstCard.pan}`,
+      "CRD0500 CARD SERVICES\nSYSTEM BROADCAST: NIGHTLY MAINTENANCE 22:00",
+      `MBR0300 MEMBER INQUIRY\nMEMBER ID ${rose.id}`,
+    ];
+
+    for (const screen of screens) {
+      const masked = redactText(screen);
+      expect(hasPiiShape(masked), `redacted output still looks like PII: ${masked}`).toBe(false);
+      for (const shape of LEAK_SHAPES) expect(masked).not.toMatch(shape.re);
+      // Non-vacuous: the first screen genuinely carries both shapes unmasked.
+      if (screen.includes(rose.ssn)) expect(hasPiiShape(screen)).toBe(true);
+    }
   });
 });
 

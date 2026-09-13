@@ -33,7 +33,17 @@ export interface Node {
    */
   readonly ref: string;
   readonly box?: { x: number; y: number; width: number; height: number };
-  /** Frame path as resolved at observation time, outermost first — NAMES, not refs. */
+  /**
+   * Frame path as resolved at observation time, outermost first.
+   *
+   * MIXED CONTENT, deliberately stated rather than glossed: `observe()` builds
+   * this from the snapshot walk, which can only push a frame's REF, and then
+   * overwrites it with a real frame NAME for the actionable nodes it enriches.
+   * So an enriched node carries a name and an unenriched one carries a ref.
+   * Nothing consumes it as a durable target — `describe()` is what mints those,
+   * and it reads the owning frame's name directly — so the mixture is a display
+   * concern, not a targeting one.
+   */
   readonly framePath: readonly string[];
   /**
    * The app's own field name, and the label beside the control.
@@ -106,7 +116,23 @@ export interface ActionContext {
    * none: it reads as enforcement in every review and enforces nothing.
    */
   readonly epoch: number;
-  /** Where the action lands — checked against the allowlist's origins and routes. */
+  /**
+   * Where the action is issued FROM — the location the surface already occupies,
+   * filled from `observation.location`.
+   *
+   * NOT where the action lands, and the difference is the whole honesty of the
+   * allowlist claim. No verb in `SurfaceAction` carries a destination: `click`
+   * and `navigate` both name a control, and where that control takes the session
+   * is the application's business, not the plan's. So the gate can only ask "is
+   * the agent permitted to be acting here", never "is it permitted to go there".
+   *
+   * CONSEQUENCE, stated plainly: a click that navigates to an off-allowlist
+   * origin is NOT refused at the moment it is issued. It is caught on the NEXT
+   * action, because that one is gated on the new location — which is exactly why
+   * this is re-read per action from the live surface rather than taken once from
+   * the configured target. One action's worth of exposure is the real bound, and
+   * `types.ts` above says why perception is not re-run inside the gate to narrow it.
+   */
   readonly url: string;
   /** Canonical screen SYMBOL, for per-screen rules. Null when it cannot be read. */
   readonly screen: string | null;
@@ -156,10 +182,27 @@ export interface TargetFacts {
   readonly framePath: readonly string[];
 }
 
-/** Raised when an action is refused. Distinguishes the two refusal reasons. */
+/**
+ * Raised when an action is refused, carrying WHICH refusal it was.
+ *
+ * `dialog_blocking` is the driver noticing a queued native dialog before it
+ * touches the page. It exists because the alternative is measurably worse: with
+ * a dialog queued, `locator.click` does not fail, it BLOCKS — measured against
+ * the mock, 30s to a Playwright `TimeoutError` that escapes the engine untyped.
+ *
+ * WHAT CONSUMERS DO WITH IT, so the name does not promise more than it buys:
+ * `src/replay/executor.ts` maps every reason except `target_unresolvable` onto
+ * the `policy_denied` failure kind, so a refusal raised here does NOT surface as
+ * `undeclared_dialog`. That kind is produced from the OBSERVATION instead —
+ * `observe()` reports the pending dialog, and `classify()` names it — which is
+ * the path the engine actually takes, because `observe()` is what runs at a
+ * step's pre- and postcondition. This refusal is the second line: it stops a
+ * caller that reaches for the page anyway (discovery, a scripted operator, a
+ * library caller) from hanging on it.
+ */
 export class SurfaceRefused extends Error {
   constructor(
-    readonly reason: "policy_denied" | "control_violation" | "target_unresolvable",
+    readonly reason: "policy_denied" | "control_violation" | "target_unresolvable" | "dialog_blocking",
     message: string,
     readonly detail?: Readonly<Record<string, unknown>>,
   ) {

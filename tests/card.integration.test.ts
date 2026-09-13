@@ -34,37 +34,46 @@
  *
  * No model, no key. This runs in CI.
  *
- * ── TWO FAULTS ARE NOT EXERCISED HERE, AND THE REASON IS MEASURED ───────────
+ * ── THE TWO DIALOG FAULTS, AND WHAT CHANGED ─────────────────────────────────
  *
- * `mock/seed.ts` ships three faults. `abend_after_commit` is tested below. The
- * two DIALOG faults are not, and this is where the next person will look for
- * them, so the measurement lives here rather than in a commit message:
+ * `mock/seed.ts` ships three faults. `abend_after_commit` and `confirm_submit`
+ * are exercised below. `broadcast` is not exercised HERE, and the reason is now
+ * a budget rather than a defect — the previous version of this comment said it
+ * was unrecoverable, and that has stopped being true:
  *
- *  - A QUEUED NATIVE DIALOG BLOCKS EVERY PAGE-TOUCHING CALL. Measured against
- *    this mock on 2026-09-12: after the alert is queued, `observe()` returned
- *    only after 33s, `locator.click` after exactly 30s ("Timeout 30000ms
- *    exceeded"), because `PlaywrightSurface` puts no bound on the aria snapshot
- *    and Playwright's default is 30s. `observe()` compounds it — the enrichment
- *    loop calls `describe()` per actionable node, and each of those blocks too —
- *    so an armed `broadcast` run did not finish within 400s. A test of it would
- *    be minutes of suite time spent pinning a hang.
+ *  - `broadcast` IS NOW RECOVERABLE, and this is the path that proves it. The
+ *    dialog arrives on the CARD SERVICES render, which the run reaches by
+ *    CLICKING at s04 — so it is present at s04's POSTCONDITION. `executor.ts`
+ *    used to apply `plan.recovery[]` in the precondition loop ONLY, turning a
+ *    recoverable classification at a postcondition into `postcondition_failed`
+ *    with an empty `recoveries[]`; the `dismiss-broadcast` rule both fixtures
+ *    declare really was unreachable on this path. The postcondition is now the
+ *    same `for(;;)` loop as the precondition, sharing the step's `used` array,
+ *    so the rule fires, the dismiss is issued, and the run continues. Measured
+ *    against a mock started on an ephemeral port: the armed run returns
+ *    `success` with a non-empty `recoveries[]`.
  *
- *  - `broadcast` COULD NOT RECOVER EVEN IF IT RETURNED PROMPTLY. The dialog
- *    arrives on the CARD SERVICES render, which the run reaches by clicking at
- *    s04 — so it is present at s04's POSTCONDITION. `src/replay/executor.ts`
- *    applies `plan.recovery[]` only in the precondition loop; a recoverable
- *    classification at a postcondition is turned into `postcondition_failed`.
- *    The `dismiss-broadcast` rule both fixtures declare is therefore unreachable
- *    on this path, whatever the mock renders.
+ *  - WHY THIS SUITE STILL DOES NOT RUN IT: a queued native dialog blocks any
+ *    page-touching call that does not check for one first, and the guard is not
+ *    yet everywhere. `observe()`, `locate()`, `read()` and `act()` now check
+ *    `pendingDialog` before touching the page; `launch()`'s initial navigation
+ *    and `describe()` do not, and `observe()`'s enrichment loop calls
+ *    `describe()` once per actionable node.
  *
- * Neither is a defect in the fixtures or in the mock, and neither is fixable from
- * the files this component owns: the first is `src/surface/playwright.ts`
- * (nothing checks `pendingDialog` before touching the page, and no call is
- * bounded), the second is `src/replay/executor.ts`. `confirm_submit` IS exercised
- * below, because the property it proves — that nothing was committed — is
- * readable from the app's audit trail and does not depend on either.
+ *    The timings below were measured BEFORE that guard landed and are kept as
+ *    the shape of the problem rather than as current numbers: with nothing
+ *    checking, `observe()` returned only after ~33s and `locator.click` after
+ *    exactly 30s ("Timeout 30000ms exceeded" — Playwright's default, since the
+ *    aria snapshot carries no bound of its own).
+ *
+ *    So recovering was never the slow part; perceiving a blocked page is. Until
+ *    the remaining two entry points are bounded, a `broadcast` case here risks
+ *    tens of seconds of suite time waiting on a driver timeout — which is the
+ *    same gap that makes `npm run mock:fault -- --run broadcast` intermittent
+ *    rather than reliable, and it is declared as open in README and REPORT.
  */
 import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -85,23 +94,25 @@ import { BoundSurface } from "../src/surface/bound.js";
 import { GatedSurface } from "../src/surface/gated.js";
 import { PlaywrightSurface } from "../src/surface/playwright.js";
 
-/** Its own port: 7101 is a reviewer's, and 7108/7109/7111 belong to other suites. */
-const PORT = 7113;
-const ENTRY = `http://localhost:${PORT}/`;
-
+/**
+ * PORT 0 — the OS picks a free one.
+ *
+ * This suite used to bind a FIXED 7113 with no `error` handler on `listen`, so
+ * anything already holding that port hung the `beforeAll` until its timeout and
+ * vitest reported all seven tests as SKIPPED rather than failed. These are the
+ * only automated coverage of every mutating-capability claim — the freeze, the
+ * audit reconciliation, `abend_after_commit`, `confirm_submit` and the
+ * end-to-end PAN/SSN leak scan — so they must not be able to vanish quietly
+ * behind the word "skipped". The repo's own scripts already bind 0 for this
+ * reason (`scripts/demo.ts`) or allocate a free port explicitly
+ * (`scripts/verify-determinism.ts`). Nothing here needs a predictable port.
+ */
 const here = path.dirname(fileURLToPath(import.meta.url));
 const load = (name: string): unknown => JSON.parse(readFileSync(path.join(here, "fixtures", name), "utf8"));
 
+let ENTRY: string;
 /** The SHIPPED default policy (src/replay/main.ts), copied in shape, not relaxed. */
-const policy = PolicyDocument.parse({
-  version: "1.0.0",
-  allowedOrigins: [ENTRY.replace(/\/$/, "")],
-  deniedRoutes: ["/__admin"],
-  allowedActions: ["navigate", "click", "fill", "press", "dismiss_dialog"],
-  screenRules: [],
-  riskHandling: { read_only: "allow", reversible: "allow", irreversible: "confirm" },
-  caps: { maxSteps: 40, maxRunSeconds: 60 },
-});
+let policy: PolicyDocument;
 
 const binding = Binding.parse(load("fcu@4.2.json"));
 let setStatus: Capability;
@@ -193,7 +204,16 @@ const run = async (
       lease,
       log,
       runId,
-      budgets: { stepMs: 8000, runMs: 40000 },
+      /**
+       * The run ceiling is generous on purpose. A reviewer measured this suite
+       * exceeding a 40s run budget under vitest's file-level concurrency while
+       * passing in 25.3s when run alone — so the old value was tight enough that
+       * a busy machine turned a passing capability into a `timeout` failure, and
+       * the budget was testing the machine rather than the engine. Raised, not
+       * removed: a run that genuinely hangs still terminates with a typed
+       * outcome. No assertion below depends on the value.
+       */
+      budgets: { stepMs: 8000, runMs: 120000 },
       now: () => Date.now(),
     });
 
@@ -232,7 +252,17 @@ const outcomeStep = (events: readonly LogEvent[]): string | null =>
 beforeAll(async () => {
   setStatus = parseCapability(load("set_status@1.0.0.json"));
   server = createServer(tenantA);
-  await new Promise<void>((resolve) => server.listen(PORT, resolve));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  ENTRY = `http://localhost:${(server.address() as AddressInfo).port}/`;
+  policy = PolicyDocument.parse({
+    version: "1.0.0",
+    allowedOrigins: [ENTRY.replace(/\/$/, "")],
+    deniedRoutes: ["/__admin"],
+    allowedActions: ["navigate", "click", "fill", "press", "dismiss_dialog"],
+    screenRules: [],
+    riskHandling: { read_only: "allow", reversible: "allow", irreversible: "confirm" },
+    caps: { maxSteps: 40, maxRunSeconds: 60 },
+  });
 }, 60000);
 
 afterAll(() => {

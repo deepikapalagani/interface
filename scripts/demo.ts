@@ -176,7 +176,11 @@ const main = async (): Promise<void> => {
       "--capability", CAPABILITY, "--binding", BINDING, "--target", target,
       "--input", `member_id=${MEMBER}`, "--evidence", evidence, "--run-id", "demo-success",
     ]);
-    record("expected business outcome: a member that exists", statusOf(success.out) === "success", `status ${statusOf(success.out)}, exit ${success.code}`);
+    // SUCCESS, not a business outcome. This case exists to be the contrast the
+    // other two are read against: the capability did what it declares and its
+    // checkpoint held, so the label has to say SUCCESS under a heading about
+    // keeping the three classes distinct.
+    record("SUCCESS: the member exists and the checkpoint held", statusOf(success.out) === "success", `status ${statusOf(success.out)}, exit ${success.code}`);
 
     const notFound = await cli("src/replay/main.ts", [
       "--capability", CAPABILITY, "--binding", BINDING, "--target", target,
@@ -240,8 +244,13 @@ const main = async (): Promise<void> => {
     console.log("  SHIPPED policy rates irreversible as 'confirm', and the artifact declares no override");
     console.log("  input because the schema forbids a secret one. So it cannot supply the authority the");
     console.log("  app demands, and the only way the step completes is a person in the live session:");
+    // `--evidence "$(mktemp -d)"` is not decoration: with no --evidence the CLI
+    // defaults to evidence/runs, which is the graded deliverable this file's
+    // header promises never to write into. A command printed by this script must
+    // hold to the same rule the script does.
     console.log("    npm run replay -- --headed --operator \\");
     console.log(`      --capability ${REPORT_LOST} --binding ${BINDING} \\`);
+    console.log("      --evidence \"$(mktemp -d)\" \\");
     console.log(`      --input member_id=${MEMBER} --input card_last4=${CARD}`);
 
     if (failed.length > 0) {

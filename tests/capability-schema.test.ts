@@ -112,6 +112,14 @@ const valid = () => ({
 type Doc = ReturnType<typeof valid>;
 
 /**
+ * Reach a shape the worked example's literal type does not admit — adding an
+ * atom the union never held, or dropping a field the literal declares. The cast
+ * is confined to these two helpers so no case has to spell one out.
+ */
+const loose = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
+const pushLoose = (arr: unknown, value: unknown): void => void (arr as unknown[]).push(value);
+
+/**
  * Each case mutates exactly one thing and pins the message it must raise, so the
  * table proves the refinement fired — not merely that something rejected it.
  */
@@ -126,26 +134,89 @@ const invalidCases: ReadonlyArray<{ name: string; mutate: (c: Doc) => void; expe
   // genuine leak and keep the tool-call-id false positive instead.
   { name: "a seeded PAN literal, which is Luhn-invalid", expectMessage: /card-number-shaped literal must be a \{\{param\}\}/,
     mutate: (c) => { c.plan.steps[0]!.value = "4111111111114021"; } },
+
+  // ---- refinement 2 now walks EVERY string in plan AND contract. These two are
+  //      the cases the old one-field version could not see at all.
+  { name: "an SSN-shaped literal in a robustness note rather than a value", expectMessage: /SSN-shaped literal must be a \{\{param\}\}/,
+    mutate: (c) => { c.plan.targets[0]!.robustness = "Anchored beside the member's SSN 900-55-0101 on this screen."; } },
+  { name: "an SSN-shaped literal in the contract, not the plan", expectMessage: /SSN-shaped literal must be a \{\{param\}\}/,
+    mutate: (c) => { c.contract.outcomes[0]!.message = "No member matches SSN 900-55-0101."; } },
+
   { name: "an acting step with no postcondition", expectMessage: /acts but asserts no postcondition/,
     mutate: (c) => { c.plan.steps[1]!.post = { all: [], any: [] }; } },
+  // Refinement 3's new half. Without it the refinement was a strict subset of the
+  // Predicate type's own "a predicate must assert something" and could never be
+  // the sole cause of a rejection.
+  { name: "an acting step whose postcondition repeats its precondition", expectMessage: /asserts the same condition before and after acting/,
+    mutate: (c) => { loose(c.plan.steps[1]!)["post"] = { all: [{ atom: "screen", is: "MEMBER_SEARCH" }], any: [] }; } },
+
   { name: "retry recovery alongside an irreversible step", expectMessage: /cannot coexist with an irreversible step/,
     mutate: (c) => {
       c.plan.steps[3]!.risk = "irreversible"; c.contract.risk = "irreversible";
       c.plan.recovery[0]!.do = "wait_and_retry"; c.plan.recovery[0]!.maxAttempts = 3; } },
   { name: "an output produced by a step that does not exist", expectMessage: /names step s99, which does not exist/,
     mutate: (c) => { c.contract.outputs[0]!.producedBy = "s99"; } },
+  // The executor populates an output ONLY on its `read` branch, so an output
+  // pointed at a click is one the engine can never produce.
+  { name: "an output produced by a step that does not read", expectMessage: /whose action is "click"; only a read step can produce an output/,
+    mutate: (c) => { c.contract.outputs[0]!.producedBy = "s02"; } },
+
   { name: "a snapshot ref persisted as a durable target", expectMessage: /refs are never durable targets/,
     mutate: (c) => { c.plan.targets[0]!.strategies[0]!.key = "f1e12"; } },
   { name: "a contract understating its own risk", expectMessage: /but the steps reach "reversible"/,
     mutate: (c) => { c.contract.risk = "read_only"; } },
-  { name: "a step targeting an undeclared symbol", expectMessage: /targets undeclared symbol NOT_DECLARED/,
+
+  // ---- refinement 8 now covers predicate atoms, not just steps[].target.
+  { name: "a step targeting an undeclared symbol", expectMessage: /symbol NOT_DECLARED is targeted but not declared/,
     mutate: (c) => { c.plan.steps[0]!.target = "NOT_DECLARED"; } },
+  { name: "a predicate atom naming an undeclared symbol", expectMessage: /symbol GHOST_FIELD is targeted but not declared/,
+    mutate: (c) => { pushLoose(c.plan.checkpoint.all, { atom: "element", target: "GHOST_FIELD", present: true }); } },
+
+  // ---- refinement 9: a plan may not interpolate a parameter nobody declared.
+  //      Before it, replay typed the literal text `{{note}}` into a live form.
+  { name: "a plan that references an undeclared parameter", expectMessage: /references \{\{note\}\}, which is not a declared input/,
+    mutate: (c) => { c.plan.steps[0]!.value = "{{note}}"; } },
+
+  // ---- refinement 10: an acting verb with nothing to act on was silently
+  //      skipped by the executor while stepsCompleted still counted it.
+  { name: "an acting step that names no target", expectMessage: /performs "click" but names no target/,
+    mutate: (c) => { delete loose(c.plan.steps[1]!)["target"]; } },
+
+  // ---- refinement 11: every identity a lookup keys on must be unique.
+  { name: "a duplicate target id", expectMessage: /target id MEMBER_ID is declared more than once/,
+    mutate: (c) => { pushLoose(c.plan.targets, { ...c.plan.targets[0]! }); } },
+  { name: "a duplicate step ref", expectMessage: /step ref s01 is used more than once/,
+    mutate: (c) => { c.plan.steps[1]!.ref = "s01"; } },
+  { name: "a duplicate input name", expectMessage: /input "member_id" is declared more than once/,
+    mutate: (c) => { c.contract.inputs[1]!.name = "member_id"; } },
+  { name: "two outputs claiming the same producing step", expectMessage: /named as the producer of more than one output/,
+    mutate: (c) => { pushLoose(c.contract.outputs, { ...c.contract.outputs[0]!, name: "second_value" }); } },
+
+  // ---- the vocabulary deletion: `press` carried a key the schema could not
+  //      record, so the executor silently issued a CLICK for it instead.
+  { name: "the removed press verb", expectMessage: /Invalid enum value.*received 'press'/,
+    mutate: (c) => { loose(c.plan.steps[1]!)["action"] = "press"; } },
+
+  // ---- refinement 12 and the provenance tightening.
+  { name: "a verified artifact with no model-call count", expectMessage: /must record modelCalls: 0/,
+    mutate: (c) => { delete loose(c.verification)["modelCalls"]; } },
+  { name: "a provenance timestamp that is not an instant", expectMessage: /Invalid datetime/,
+    mutate: (c) => { c.provenance.discoveredAt = "12 September 2026"; } },
+  { name: "an artifact attributed to nobody", expectMessage: /at least 1 character/,
+    mutate: (c) => { c.provenance.model = ""; } },
 ];
 
 /**
  * Mutations that must still PARSE, for the same reason the table above pins
  * messages: a refinement that rejects too much is as broken as one that rejects
  * too little, and only silently so.
+ *
+ * This table grew with the refinements, and it is the half that matters most for
+ * the two that were WIDENED. A PII scan that walks every string in the artifact
+ * and a parameter rule that reads every `{{...}}` both have far more surface to
+ * over-reject on than the single-field versions they replaced, and the corpus
+ * they must not reject is full of nine-digit member ids, four-digit card
+ * suffixes and app message codes.
  */
 const acceptedCases: ReadonlyArray<{ name: string; mutate: (c: Doc) => void }> = [
   // MEASURED 2026-09-12: the pre-guard `\b\d{13,19}\b` flagged 24 strings across
@@ -153,6 +224,60 @@ const acceptedCases: ReadonlyArray<{ name: string; mutate: (c: Doc) => void }> =
   // `\b` matches at the boundary between the `-` and the first digit.
   { name: "a tool-call-id-shaped literal, which is not a card number",
     mutate: (c) => { c.plan.steps[0]!.value = "call_-7267060200698277786"; } },
+
+  // The working data of a servicing screen, in the fields the widened walk now
+  // reaches. Redacting or rejecting these is the failure mode §3.4 warns about:
+  // safety that breaks the thing it protects.
+  { name: "a member id and a card suffix in a robustness note",
+    mutate: (c) => { c.plan.targets[0]!.robustness = "Row keyed by member 400200101, card ending 4021, branch 012."; } },
+  { name: "an app message code in an outcome message",
+    mutate: (c) => { c.contract.outcomes[0]!.message = "NO RECORDS MATCH SELECTION — MSG 0071"; } },
+
+  // The measured exemption refinement 8 documents: `rowCount.grid` is ignored by
+  // the evaluator, and four FROZEN committed artifacts cite a RESULTS_GRID that
+  // no plan.targets declares. Enforcing it would reject graded evidence.
+  { name: "a rowCount grid symbol that plan.targets does not declare",
+    mutate: (c) => { loose(c.contract.outcomes[0]!.when.all[1]!)["grid"] = "NEVER_DECLARED_GRID"; } },
+
+  // Refinement 9 must read predicates too, not only step values — and must be
+  // satisfied by a parameter that IS declared, wherever it appears.
+  { name: "a declared parameter referenced from a predicate rather than a step value",
+    mutate: (c) => { pushLoose(c.plan.checkpoint.all, { atom: "text", contains: "{{action}}" }); } },
+
+  // Refinement 10 binds ACTING verbs only. An assert acts on nothing.
+  { name: "an assert step that names no target",
+    mutate: (c) => {
+      pushLoose(c.plan.steps, {
+        ref: "s06", title: "Confirm the confirmation screen is showing", action: "assert",
+        pre: { all: [{ atom: "screen", is: "CONFIRMATION" }], any: [] },
+        post: { all: [{ atom: "text", contains: "CONFIRMATION" }], any: [] },
+        risk: "read_only", approval: "none",
+      });
+    } },
+
+  // Refinement 11 forbids two outputs sharing ONE producer, not two outputs.
+  { name: "a second output produced by its own second read step",
+    mutate: (c) => {
+      pushLoose(c.plan.steps, {
+        ref: "s06", title: "Read the resulting card status", action: "read", target: "CONFIRMATION_NUMBER",
+        pre: { all: [{ atom: "screen", is: "CONFIRMATION" }], any: [] },
+        post: { all: [{ atom: "element", target: "CONFIRMATION_NUMBER", present: true }], any: [] },
+        risk: "read_only", approval: "none",
+      });
+      pushLoose(c.contract.outputs, {
+        name: "card_status", type: "string", sensitivity: "confidential", producedBy: "s06",
+        description: "The status the card ended in.",
+      });
+    } },
+
+  // Refinement 12 binds only a SUCCESS claim. An honest "not yet verified"
+  // artifact — which is what every committed fixture is — carries no count.
+  { name: "an unverified artifact with no model-call count",
+    mutate: (c) => {
+      loose(c.verification)["replayResult"] = "not_yet_verified";
+      delete loose(c.verification)["modelCalls"];
+      delete loose(c.verification)["replayedAt"];
+    } },
 ];
 
 describe("capability schema", () => {

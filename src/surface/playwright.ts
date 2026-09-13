@@ -103,7 +103,37 @@ interface BannerWindow {
  *
  * Deliberately self-contained — no reference to any module-scope identifier —
  * because Playwright serialises this function's SOURCE to inject it. A closure
- * over `BANNER_ID` would serialise to a ReferenceError at the far end.
+ * over a module-level `BANNER_ID` would serialise to a ReferenceError at the far
+ * end.
+ *
+ * ── WHY THIS FUNCTION IS FLAT ───────────────────────────────────────────────
+ *
+ * IT IS FLAT BECAUSE A NESTED ONE DID NOT RENDER AT ALL, and that is measured,
+ * not feared. This body used to declare `const render = async () => {...}` and
+ * call it. Every npm script in this repo runs through `tsx`, whose esbuild
+ * `keepNames` transform rewrites any function assigned to a binding as
+ * `__name(async () => {...}, "render")` so the function keeps its `.name`.
+ * `__name` is an esbuild module-scope helper. It does not exist in the page. So
+ * the serialised source referenced an identifier the browser had never heard of
+ * and BOTH injection paths died with `ReferenceError: __name is not defined` —
+ * `frame.evaluate` here and `addInitScript` below — leaving the operator looking
+ * at a frozen browser with no banner and no HAND BACK button.
+ *
+ * Confirmed two ways: `esbuild.transformSync(..., {keepNames: true})` on this
+ * file emitted `const render = __name(async () => {...}, "render")`, and running
+ * the real entry point reported the banner absent in all three frames.
+ *
+ * The rule this leaves behind, which the next person must keep: NOTHING IN HERE
+ * MAY BE A NAMED FUNCTION. Inline callbacks are fine — an arrow in argument
+ * position gets no inferred name, so esbuild leaves it alone — but the moment
+ * any part of this body is hoisted into a `const fn = ...`, the banner silently
+ * stops rendering again. The original comment defended against the author's own
+ * identifiers; it was the transpiler that injected one.
+ *
+ * NO try/catch, ALSO ON PURPOSE. Failures now propagate to `notice()`, which
+ * LOGS them per frame. The version that swallowed everything here is what let
+ * the ReferenceError above go unnoticed for the life of the feature, while its
+ * comment blamed a frame navigating mid-paint.
  *
  * It asks Node which text to show rather than deciding for itself, and that is
  * the E5 correction made mechanical: `__meridianNotice` is an `exposeBinding`,
@@ -120,55 +150,62 @@ interface BannerWindow {
  */
 const paintBanner = async (): Promise<void> => {
   const ID = "__meridian_operator_banner";
-  const render = async (): Promise<void> => {
-    try {
-      document.getElementById(ID)?.remove();
-      const api = (window as unknown as BannerWindow).__meridianNotice;
-      if (typeof api !== "function") return;
-      const text = await api();
-      if (text === null || text === undefined || text === "") return;
-
-      const body = document.body;
-      if (!body || body.tagName === "FRAMESET") return;
-
-      const bar = document.createElement("div");
-      bar.id = ID;
-      bar.setAttribute(
-        "style",
-        "position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#7E1416;color:#fff;" +
-          "font:12px/1.5 Arial,Helvetica,sans-serif;padding:8px 10px;border-bottom:2px solid #000;" +
-          "box-shadow:0 2px 6px rgba(0,0,0,.4)",
-      );
-
-      const label = document.createElement("span");
-      label.textContent = text;
-      bar.appendChild(label);
-
-      const button = document.createElement("button");
-      button.textContent = "HAND BACK";
-      button.setAttribute("style", "margin-left:12px;font:bold 11px Arial,sans-serif;padding:2px 10px;cursor:pointer");
-      button.addEventListener("click", () => {
-        const handback = (window as unknown as BannerWindow).__meridianHandback;
-        if (typeof handback === "function") void handback({ kind: "handed_back", operator: "banner" });
-      });
-      bar.appendChild(button);
-
-      body.appendChild(bar);
-    } catch {
-      /* A frame torn down mid-paint is not a failure of the turn. */
-    }
-  };
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => void render());
-    return;
+    await new Promise<void>((resolve) => {
+      document.addEventListener("DOMContentLoaded", () => resolve(), { once: true });
+    });
   }
-  await render();
+
+  document.getElementById(ID)?.remove();
+  const api = (window as unknown as BannerWindow).__meridianNotice;
+  if (typeof api !== "function") return;
+  const text = await api();
+  if (text === null || text === undefined || text === "") return;
+
+  const body = document.body;
+  if (!body || body.tagName === "FRAMESET") return;
+
+  const bar = document.createElement("div");
+  bar.id = ID;
+  bar.setAttribute(
+    "style",
+    "position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#7E1416;color:#fff;" +
+      "font:12px/1.5 Arial,Helvetica,sans-serif;padding:8px 10px;border-bottom:2px solid #000;" +
+      "box-shadow:0 2px 6px rgba(0,0,0,.4)",
+  );
+
+  const label = document.createElement("span");
+  label.textContent = text;
+  bar.appendChild(label);
+
+  const button = document.createElement("button");
+  button.textContent = "HAND BACK";
+  button.setAttribute("style", "margin-left:12px;font:bold 11px Arial,sans-serif;padding:2px 10px;cursor:pointer");
+  button.addEventListener("click", () => {
+    const handback = (window as unknown as BannerWindow).__meridianHandback;
+    if (typeof handback === "function") void handback({ kind: "handed_back", operator: "banner" });
+  });
+  bar.appendChild(button);
+
+  body.appendChild(bar);
 };
 
 export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel, HumanHands {
   private dialogHandlers: ((message: string) => void)[] = [];
   private pendingDialog: Dialog | null = null;
+
+  /**
+   * Woken the instant a native dialog is queued, so a page call already in
+   * flight can stop waiting on something that can no longer complete.
+   *
+   * This is the in-flight half of the dialog problem. `pendingDialog` covers the
+   * case where one is ALREADY queued when we are asked to act; this covers the
+   * case where the action itself raises it — an `onsubmit` confirm() — where the
+   * click never returns and Playwright's own 30s default is the only thing that
+   * ends the wait.
+   */
+  private dialogWaiters: (() => void)[] = [];
 
   /**
    * THE SECOND ENFORCEMENT POINT'S ENTIRE STATE. One boolean, owned here, read
@@ -183,8 +220,16 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
   /** Set only while a turn is being awaited; nulled by whichever end arrives first. */
   private handback: ((signal: HandbackSignal) => void) | null = null;
 
-  /** `exposeBinding` throws on a second registration of the same name, so this latches. */
-  private plumbed = false;
+  /**
+   * One latch per registration, each set only AFTER that registration succeeds.
+   *
+   * Three rather than one boolean because a partial failure has to be resumable:
+   * `exposeBinding` throws on a second registration of the same name, so a retry
+   * must skip exactly the pieces that already landed and re-attempt only the rest.
+   */
+  private noticeBound = false;
+  private handbackBound = false;
+  private initScriptAdded = false;
 
   /**
    * The BrowserContext is deliberately not stored. M4's handoff needs it — E5
@@ -210,6 +255,10 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
     // into a typed hard failure instead of a silent no-op.
     page.on("dialog", (dialog) => {
       surface.pendingDialog = dialog;
+      // Wake anything blocked on a page call this dialog has just made
+      // uncompletable, BEFORE the message handlers run: a handler is free to
+      // take its time, and the waiter is what stops a 30s hang.
+      for (const wake of surface.dialogWaiters.splice(0)) wake();
       for (const h of surface.dialogHandlers) h(dialog.message());
     });
 
@@ -236,7 +285,68 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
     this.dialogHandlers.push(handler);
   }
 
+  /**
+   * What the surface reports while a native dialog holds the page.
+   *
+   * MEASURED, and the reason this exists at all: with a dialog queued,
+   * `ariaSnapshotJSON` does not return a partial view, it BLOCKS — 30s to a
+   * Playwright `TimeoutError` that `settle()` does not catch and that therefore
+   * escapes `replay()` untyped. `observe()` compounded it, because the
+   * enrichment loop calls `describe()` per actionable node and each of those
+   * blocks too. So the dialog faults could not be exercised at all: an armed
+   * `broadcast` run did not finish within 400s.
+   *
+   * WHAT THIS GUARD DOES NOT COVER, measured rather than reasoned about: a dialog
+   * that arrives AFTER the check above has passed. `observe()` then has a snapshot
+   * in flight, and `describe()` — which the enrichment loop calls per actionable
+   * node — carries no guard of its own, so each waits out Playwright's 30s
+   * default. `launch()`'s `page.goto` is unguarded for the same reason, and was
+   * measured at exactly that: 30s to `TimeoutError` when a dialog was already
+   * queued at navigation. So an armed `broadcast` replay is bounded in the common
+   * case and NOT bounded in general — four runs of the shipped fault against this
+   * mock: three completed (59s, 89s, 119s) and one was still stalled at s04's
+   * postcondition when it was killed at 400s, having logged `step.acted s04` and
+   * no `recovery.applied`. `scripts/fault.ts` records the same intermittency from
+   * the other side, and its `broadcast` expectation is deliberately left red.
+   *
+   * Nothing here touches the page. `page.url()` is a synchronous read of state
+   * the driver already holds, so it answers while the dialog is up.
+   *
+   * WHAT IS DELIBERATELY EMPTY, because a caller must not mistake this for a
+   * normal perception: there are no nodes and no text, since we genuinely cannot
+   * see the screen behind the dialog. Reporting the last known text instead would
+   * be worse than reporting none — a postcondition could then match content that
+   * is no longer visible and a blocked run would be recorded as a success.
+   * `screen` is null for the same reason.
+   *
+   * The digest keys on the MESSAGE, so discovery's no-progress detector sees a
+   * stuck dialog as a stuck surface rather than as movement.
+   */
+  private blockedObservation(message: string): Observation {
+    return {
+      location: this.page.url(),
+      screen: null,
+      nodes: [],
+      text: "",
+      dialog: { message },
+      digest: digestOf(`dialog|${message}`),
+    };
+  }
+
   async observe(): Promise<Observation> {
+    /**
+     * ANSWER FROM THE DIALOG, NOT FROM THE PAGE.
+     *
+     * This is what makes `undeclared_dialog` reachable. `classify()` produces
+     * that failure kind from `observation.dialog`, and a step's pre- and
+     * postcondition are the two moments `observe()` runs — so reporting the
+     * dialog promptly is the whole mechanism by which a blocked surface becomes
+     * a typed result instead of a 30s hang. It is equally what lets a DECLARED
+     * `plan.recovery[]` rule keyed on a `dialog` atom fire at all.
+     */
+    const blocking = this.pendingDialog;
+    if (blocking !== null) return this.blockedObservation(blocking.message());
+
     const snap = (await this.page.ariaSnapshotJSON({ mode: "ai", boxes: true })) as unknown;
     const nodes: Node[] = [];
 
@@ -261,18 +371,35 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
     };
     walk(snap, []);
 
-    // Enrich the controls a model can actually act on with the two facts that
-    // distinguish them on this surface: the app's own field name and the label
-    // beside them. Without this the model is choosing between identical-looking
-    // `textbox` lines. Only actionable nodes are enriched, and the list is capped,
-    // because each one costs a round trip.
+    /**
+     * Enrich the controls a model can actually act on with the two facts that
+     * distinguish them on this surface: the app's own field name and the label
+     * beside them. Without this the model is choosing between identical-looking
+     * `textbox` lines. Each one costs a round trip, so the number ENRICHED is
+     * capped — but the cap counts only the nodes it actually spends a round trip
+     * on.
+     *
+     * THE CAP USED TO COUNT THE WRONG LIST, and it silently broke the flagship
+     * screen. The test was `enriched.length >= 40`, but `enriched` accumulates
+     * EVERY node — table cells, rows, static text — so a dense grid exhausted the
+     * budget before the controls were reached, and any actionable node past
+     * overall index 39 lost `fieldName` and `anchorText` while still looking
+     * enriched. Measured on CRD0500: 46 nodes, 4 actionable, only 2 enriched —
+     * the OVERRIDE CODE field and the APPLY submit reached the model as a bare
+     * `textbox` and `button`, on the one screen from which anything can be
+     * changed. `serialize.ts` records that exactly this blindness had already
+     * caused a wrong-control pick once.
+     */
     const ACTIONABLE = new Set(["textbox", "button", "link", "combobox", "checkbox", "radio"]);
+    const MAX_ENRICHED = 40;
     const enriched: Node[] = [];
+    let enrichedActionable = 0;
     for (const n of nodes) {
-      if (!ACTIONABLE.has(n.role) || enriched.length >= 40) {
+      if (!ACTIONABLE.has(n.role) || enrichedActionable >= MAX_ENRICHED) {
         enriched.push(n);
         continue;
       }
+      enrichedActionable += 1;
       const facts = await this.describe(n.ref).catch(() => null);
       enriched.push(
         facts
@@ -311,31 +438,83 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
     };
   }
 
-  /** Walk the frame path: by name, then url pattern, then positional index. */
+  /**
+   * Walk the frame path OUTERMOST FIRST, descending one hop at a time: by name,
+   * then url pattern, then positional index among that hop's candidates.
+   *
+   * IT USED TO NOT DESCEND, and it failed silently, which is the worst way for a
+   * targeting bug to fail. The loop returned on the first hop that matched
+   * ANYTHING in the flat `page.frames()` list, so a two-hop path stopped at the
+   * outer frame and never reached the inner one — and reported `degraded: false`
+   * while doing it, so nothing downstream could tell that the write had landed
+   * in the wrong container. Measured against this mock: a path of
+   * `[{name:"nav"},{name:"content"}]` resolved clean and non-degraded, and a real
+   * fill through it put the member id into the NAV frame's quick-lookup box
+   * rather than the search screen's member-id field — which is precisely the
+   * "it picked the wrong one" failure `types.ts` says is not hypothetical.
+   *
+   * Each hop is now searched among the DESCENDANTS OF THE PREVIOUS HOP, so a
+   * later hop can only ever narrow. A hop that matches nothing refuses loudly
+   * instead of falling through to the next one.
+   *
+   * SCOPE, so this is not read as more than it is: every artifact and every
+   * minted target in this repo uses exactly ONE hop, and `describe()` can only
+   * ever produce zero or one. Because `page.frames()` is flat, a single named hop
+   * already reaches an arbitrarily nested frame, so this is not what the §3.7
+   * nested-frameset story depends on. It is a hand-authoring trap being closed,
+   * and the behaviour for the one-hop paths that actually ship is unchanged:
+   * the first hop still searches the whole tree from the main frame.
+   */
   private resolveFrame(target: TargetDescriptor): { frame: Frame; degraded: boolean } {
-    const frames = this.page.frames();
+    const all = this.page.frames();
+    let scope: Frame = this.page.mainFrame();
     let degraded = false;
 
     for (const hop of target.framePath) {
-      if (hop.name) {
-        const byName = frames.find((f) => f.name() === hop.name);
-        if (byName) return { frame: byName, degraded };
+      // Everything below the current scope, at any depth. Built iteratively
+      // rather than recursively so there is no named helper to hoist.
+      const candidates: Frame[] = [];
+      const pending: Frame[] = [...scope.childFrames()];
+      while (pending.length > 0) {
+        const next = pending.shift();
+        if (!next) break;
+        candidates.push(next);
+        pending.push(...next.childFrames());
       }
-      degraded = true; // the primary hop missed; anything below is a fallback
-      if (hop.urlPattern) {
-        const re = new RegExp(hop.urlPattern);
-        const byUrl = frames.find((f) => re.test(f.url()));
-        if (byUrl) return { frame: byUrl, degraded };
+
+      const byName = hop.name === undefined ? undefined : candidates.find((f) => f.name() === hop.name);
+      if (byName) {
+        scope = byName;
+        continue;
       }
-      if (hop.index !== undefined) {
-        const byIndex = frames[hop.index];
-        if (byIndex) return { frame: byIndex, degraded };
+      // The primary hop missed; anything below this point is a fallback, and the
+      // caller is told so via `degraded` on the Resolution.
+      degraded = true;
+
+      const byUrl =
+        hop.urlPattern === undefined ? undefined : candidates.find((f) => new RegExp(hop.urlPattern ?? "").test(f.url()));
+      if (byUrl) {
+        scope = byUrl;
+        continue;
       }
+
+      const byIndex = hop.index === undefined ? undefined : candidates[hop.index];
+      if (byIndex) {
+        scope = byIndex;
+        continue;
+      }
+
+      throw new SurfaceRefused("target_unresolvable", `no frame matched the path for ${target.id}`, {
+        tried: target.framePath,
+        failedHop: hop,
+        // What was actually available AT THIS HOP, which is the debuggable fact —
+        // the full list would not say where the descent stopped.
+        availableAtHop: candidates.map((f) => f.name() || "(unnamed)"),
+        available: all.map((f) => f.name() || "(main)"),
+      });
     }
-    throw new SurfaceRefused("target_unresolvable", `no frame matched the path for ${target.id}`, {
-      tried: target.framePath,
-      available: frames.map((f) => f.name() || "(main)"),
-    });
+
+    return { frame: scope, degraded };
   }
 
   private candidate(frame: Frame, kind: string, key: string, role?: string): Locator {
@@ -363,23 +542,90 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
    * minting mechanical — the model names a ref, and the executor (never the
    * model) derives the durable anchors from the live element.
    */
+  /**
+   * The durable facts of ONE already-resolved element, in a single round trip.
+   *
+   * Shared by `describe()` (record time) and `verifyElement()` (replay time) on
+   * purpose: the role a target is MINTED with and the role it is later CHECKED
+   * against must be computed the same way, or a target can be recorded as one
+   * thing and verified as another.
+   *
+   * THE ROLE IS COMPUTED, NOT READ. It used to be `el.getAttribute("role")`,
+   * which is empty on every control on every screen here — this markup is
+   * deliberately pre-ARIA, with no roles, no test ids and no `<label for>`. So
+   * `facts.role` was the empty string everywhere, which is what made the
+   * verification below unable to fail.
+   *
+   * The mapping is a pragmatic subset of the HTML-AAM, not an implementation of
+   * it: enough to tell the controls on a legacy servicing screen apart, and
+   * honest about the ones it lumps together (a password field answers `textbox`,
+   * which is not its ARIA role but is the useful answer for targeting). It is
+   * inline rather than factored into a helper because this function's SOURCE is
+   * serialised into the page — a named nested function would be rewritten to
+   * reference esbuild's `__name` and fail exactly as the banner did.
+   */
+  private async factsOf(
+    loc: Locator,
+  ): Promise<{ tag: string; role: string; fieldName: string | null; anchorText: string | null }> {
+    return loc.evaluate((el: Element) => {
+      const row = el.closest("tr");
+      const cells = row ? Array.from(row.querySelectorAll("td")) : [];
+      const mine = cells.findIndex((c) => c.contains(el));
+
+      const tag = el.tagName.toLowerCase();
+      const type = (el.getAttribute("type") ?? "").toLowerCase();
+      let role = el.getAttribute("role") ?? "";
+      if (role === "") {
+        if (tag === "a") role = el.hasAttribute("href") ? "link" : "generic";
+        else if (tag === "button") role = "button";
+        else if (tag === "textarea") role = "textbox";
+        else if (tag === "select") role = el.hasAttribute("multiple") ? "listbox" : "combobox";
+        else if (tag !== "input") role = "generic";
+        // An `<input type="image">` submit is a BUTTON. Getting this one wrong is
+        // what made the old verify vacuous: every input, submits included, passed
+        // a `textbox` check.
+        else if (type === "submit" || type === "button" || type === "image" || type === "reset") role = "button";
+        else if (type === "checkbox") role = "checkbox";
+        else if (type === "radio") role = "radio";
+        else if (type === "hidden") role = "none";
+        else role = "textbox";
+      }
+
+      // WHAT NAMES THIS CONTROL — and the two cases are genuinely different.
+      //
+      // A control with no text of its own (an input, a select) is named by the
+      // label cell beside it: on these screens that is the only thing tying it to
+      // a meaning. A LINK or BUTTON carries its own visible text, which is both
+      // stabler and what the binding already names it by.
+      //
+      // MEASURED 2026-09-13 on a live discovery run. The results grid renders
+      // `… | OPEN | <a>SELECT</a>`, so the cell-to-the-left rule anchored the
+      // detail link on `OPEN` — the STATUS column's DATA. The compiler rightly
+      // refused the artifact: the binding names that link `SELECT`, and an anchor
+      // of `OPEN` would resolve against one member's card status and miss the
+      // next member, whose row reads `FROZEN`. Row data is not a label, and a
+      // target anchored on it is welded to one record.
+      //
+      // Written as plain consts, not a helper: this function's source is
+      // serialised into the page, where a named nested function is rewritten to
+      // reference esbuild's `__name` and throws exactly as the banner did.
+      const own = (el.textContent ?? "").trim();
+      const namesItself = (tag === "a" || tag === "button") && own !== "" && own.length <= 40;
+
+      return {
+        tag,
+        role,
+        fieldName: el.getAttribute("name"),
+        anchorText: namesItself ? own : mine > 0 ? (cells[mine - 1]?.textContent ?? "").trim() : null,
+      };
+    });
+  }
+
   async describe(ref: string): Promise<TargetFacts | null> {
     const loc = this.page.locator(`aria-ref=${ref}`);
     if ((await loc.count().catch(() => 0)) !== 1) return null;
 
-    const facts = await loc.first().evaluate((el: Element) => {
-      const row = el.closest("tr");
-      const cells = row ? Array.from(row.querySelectorAll("td")) : [];
-      const mine = cells.findIndex((c) => c.contains(el));
-      return {
-        tag: el.tagName.toLowerCase(),
-        role: el.getAttribute("role") ?? "",
-        fieldName: el.getAttribute("name"),
-        // The label cell immediately to the left: on these screens it is the
-        // only thing tying a control to what it means.
-        anchorText: mine > 0 ? (cells[mine - 1]?.textContent ?? "").trim() : null,
-      };
-    });
+    const facts = await this.factsOf(loc.first());
 
     // Ask the ELEMENT which frame owns it.
     //
@@ -406,6 +652,33 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
   private async locate(
     target: TargetDescriptor,
   ): Promise<{ locator: Locator; resolution: Resolution } | null> {
+    /**
+     * RESOLUTION TOUCHES THE PAGE, so it blocks behind a dialog exactly as
+     * acting does.
+     *
+     * This guard is the one the first version of this fix MISSED, and the miss
+     * was measured rather than reasoned about: with `observe()` and `perform()`
+     * guarded but not this, an armed `broadcast` replay still took 832s. The
+     * reason is that predicate evaluation does not act — it calls `find()` and
+     * `read()`, both of which funnel through here into `locator.count()`, and
+     * each of those waits out Playwright's 30s default. A step's pre- and
+     * postcondition evaluate several atoms, so the hang simply moved from the
+     * action to the predicates.
+     *
+     * Callers are built for this. `predicate.ts` wraps both in
+     * `.catch(() => null)`, so a refusal reads as "not present" / "unreadable",
+     * which is the honest answer while a dialog covers the screen: we genuinely
+     * cannot see whether the element is there.
+     */
+    const queued = this.pendingDialog;
+    if (queued !== null) {
+      throw new SurfaceRefused(
+        "dialog_blocking",
+        `a native dialog is blocking this page, so ${target.id} cannot be resolved until it is answered`,
+        { point: "driver", target: target.id, dialog: queued.message() },
+      );
+    }
+
     const { frame, degraded: frameDegraded } = this.resolveFrame(target);
     const expected = target.strategies[0]?.kind ?? "table_anchor";
     const attempted: string[] = [];
@@ -440,16 +713,25 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
     throw new SurfaceRefused("target_unresolvable", `no strategy resolved ${target.id}`, { attempted });
   }
 
-  /** Re-read the resolved element's own facts before acting on it. */
+  /**
+   * Re-read the resolved element's own facts before acting on it.
+   *
+   * A CHECK THAT CAN ACTUALLY FAIL, which the previous one could not. It tested
+   * `(role === "textbox" && tag === "input")`, and on this surface EVERY control
+   * that is not a link is an `<input>` — including the `type="image"` submits.
+   * So a target recorded as a textbox verified happily against a submit button,
+   * and the one thing this gate exists to catch — the plan pointing at the wrong
+   * KIND of control after a redesign — went straight through.
+   *
+   * It now compares against the same computed role `describe()` mints with, so
+   * asking for a `textbox` and resolving a submit is a miss, and `locate()` moves
+   * on to the next strategy instead of clicking it.
+   */
   private async verifyElement(loc: Locator, target: TargetDescriptor): Promise<boolean> {
     try {
       if (target.verify.role) {
-        const tag = (await loc.evaluate((el) => el.tagName.toLowerCase())) as string;
-        const looksRight =
-          (target.verify.role === "textbox" && tag === "input") ||
-          (target.verify.role === "link" && tag === "a") ||
-          (target.verify.role === "button" && (tag === "button" || tag === "input"));
-        if (!looksRight) return false;
+        const { role } = await this.factsOf(loc);
+        if (role !== target.verify.role) return false;
       }
       if (target.verify.nameContains) {
         const text = ((await loc.textContent()) ?? "").trim();
@@ -479,6 +761,24 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
    *     column silently corrupts.
    */
   async read(target: TargetDescriptor): Promise<string | null> {
+    /**
+     * Guarded in its OWN right, not just via `locate()`.
+     *
+     * `locate()` below is called with `.catch(() => null)`, so its refusal is
+     * swallowed here by design — and then the static-text fallback goes straight
+     * back to the page (`resolveFrame`, `row.count()`, `cells.nth()`), which
+     * would block behind the dialog all over again. Refusing up front is what
+     * makes the whole method prompt rather than only its first half.
+     */
+    const queued = this.pendingDialog;
+    if (queued !== null) {
+      throw new SurfaceRefused(
+        "dialog_blocking",
+        `a native dialog is blocking this page, so ${target.id} cannot be read until it is answered`,
+        { point: "driver", target: target.id, dialog: queued.message() },
+      );
+    }
+
     const found = await this.locate(target).catch(() => null);
     if (found) {
       const tag = (await found.locator.evaluate((el) => el.tagName.toLowerCase())) as string;
@@ -526,7 +826,42 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
    * anything about the one automation actually takes.
    */
   private async perform(action: SurfaceAction): Promise<Resolution | null> {
+    /**
+     * NOTICE A QUEUED DIALOG BEFORE TOUCHING THE PAGE.
+     *
+     * Every verb below except the two dialog answers goes through the page, and
+     * a queued native dialog does not make those fail — it makes them BLOCK.
+     * Measured against this mock: `locator.click` returned after exactly 30s with
+     * `Timeout 30000ms exceeded`, as an untyped Playwright error that escapes the
+     * engine entirely. A prompt typed refusal is strictly better than a hang that
+     * ends in a stack trace.
+     *
+     * The engine rarely arrives here, because `observe()` reports the dialog at
+     * the step boundary first and `classify()` names it. This is the second line,
+     * for the callers that reach for the page anyway: the discovery loop acting
+     * on a stale view, a scripted operator, an embedder driving the driver
+     * directly.
+     */
+    const queued = this.pendingDialog;
+    if (queued !== null && action.kind !== "accept_dialog" && action.kind !== "dismiss_dialog") {
+      throw new SurfaceRefused(
+        "dialog_blocking",
+        `a native dialog is blocking this page, so ${action.kind} cannot be performed until it is answered`,
+        { point: "driver", action: action.kind, dialog: queued.message() },
+      );
+    }
+
     switch (action.kind) {
+      /**
+       * A DRIVER CAPABILITY WITH NO CURRENT PRODUCER, kept deliberately.
+       *
+       * `press` is in the `SurfaceAction` vocabulary and in every shipped
+       * policy's `allowedActions`, but nothing emits one: the compiler has no
+       * verb that mints it and no artifact in the repo contains one. It stays
+       * because a keyboard is how a real 3270/5250-style screen is driven — PF
+       * keys, not clicks — and the seam is meant to admit that adapter without a
+       * vocabulary change. Said plainly rather than left to look load-bearing.
+       */
       case "press":
         await this.page.keyboard.press(action.key);
         return null;
@@ -547,16 +882,70 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
       case "fill": {
         const found = await this.locate(action.target);
         if (!found) return null;
-        await found.locator.fill(action.value);
+        await this.raceQueuedDialog(found.locator.fill(action.value));
         return found.resolution;
       }
+      /**
+       * `navigate` IS A CLICK. Identical implementation, deliberately and not by
+       * oversight: on this class of application you do not navigate by URL, you
+       * click the link or the menu item that gets you there — and the only
+       * mutating route refuses GET precisely so a URL copied out of a log cannot
+       * re-trigger anything. The two verbs stay distinct in the vocabulary
+       * because the ARTIFACT means different things by them, and a reviewer
+       * reading a plan should be able to see "this step moves screens" without
+       * inferring it from the target's name. Nothing here treats them
+       * differently, and nothing should pretend otherwise.
+       */
       case "click":
       case "navigate": {
         const found = await this.locate(action.target);
         if (!found) return null;
-        await found.locator.click();
+        await this.raceQueuedDialog(found.locator.click());
         return found.resolution;
       }
+    }
+  }
+
+  /**
+   * Await a page call, but stop waiting the moment a native dialog is queued.
+   *
+   * THE IN-FLIGHT CASE, which checking `pendingDialog` beforehand cannot cover:
+   * an `onsubmit` confirm() is raised BY the click, so there is nothing to notice
+   * until the click is already blocked on it. Measured: the shipped
+   * `confirm_submit` fault made the real replay CLI die after 52s with
+   * `locator.click: Timeout 30000ms exceeded` — an untyped crash where the fault
+   * catalogue promises a typed `undeclared_dialog`.
+   *
+   * This is a CONDITION, not a timeout. Nothing here guesses how long a click
+   * ought to take; the wait ends when the driver is told a dialog exists, which
+   * is the same discipline `settle()` applies to the application's own state. A
+   * fixed bound would have to be either longer than a slow machine or shorter
+   * than a slow app.
+   *
+   * The action is reported as ISSUED rather than refused, and that is the honest
+   * answer: the click really was dispatched and the page really did begin
+   * handling it. Whether the submit behind the dialog committed is not knowable
+   * from here — so the engine learns what happened from the step's
+   * postcondition, where `observe()` reports the dialog and the run gets a typed
+   * `undeclared_dialog` instead of a phantom success.
+   */
+  private async raceQueuedDialog(op: Promise<unknown>): Promise<void> {
+    let wake = (): void => {};
+    const arrived = new Promise<"dialog">((resolve) => {
+      wake = (): void => resolve("dialog");
+      this.dialogWaiters.push(wake);
+    });
+    const completed = op.then(() => "completed" as const);
+    // The loser stays pending and rejects later — a click behind a dialog throws
+    // at Playwright's 30s default. Marking it handled here is what stops that
+    // becoming an unhandled rejection long after the run has moved on.
+    void completed.catch(() => {});
+
+    try {
+      await Promise.race([completed, arrived]);
+    } finally {
+      const i = this.dialogWaiters.indexOf(wake);
+      if (i >= 0) this.dialogWaiters.splice(i, 1);
     }
   }
 
@@ -622,8 +1011,28 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
     // The live frames are therefore repainted directly, with the same function,
     // so there is only ever one banner implementation.
     for (const frame of this.page.frames()) {
-      await frame.evaluate(paintBanner).catch(() => {
-        /* A frame that navigated mid-paint will be caught by the init script. */
+      await frame.evaluate(paintBanner).catch((e: unknown) => {
+        /**
+         * LOGGED, NEVER SWALLOWED.
+         *
+         * The bare `.catch(() => {})` this replaces is the single reason the
+         * banner could be broken for the life of the feature without anyone
+         * noticing: every frame was failing with
+         * `ReferenceError: __name is not defined` and the comment attributed it
+         * to a frame navigating mid-paint. Both things land here, and the log
+         * cannot tell them apart — which is exactly why it must print rather than
+         * decide. A frame torn down mid-paint is genuinely harmless; a
+         * ReferenceError means no operator will ever see a banner, and those two
+         * must not look the same from outside.
+         *
+         * A failure here is NOT fatal to the turn, and that is still right: the
+         * session is already locked (`beginHumanTurn` arms before it paints) and
+         * the operator console at its own port is a second, independent way to
+         * hand back.
+         */
+        console.warn(
+          `operator banner: paint FAILED in frame "${frame.name() || "(main)"}" — ${e instanceof Error ? e.message : String(e)}`,
+        );
       });
     }
   }
@@ -650,6 +1059,19 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
         this.handback = null;
         resolve({ kind: "timed_out" });
       }, opts.timeoutMs);
+
+      /**
+       * UNREF'D, for the reason `escalation.ts`'s own deadline is.
+       *
+       * Node keeps a process alive for a pending timer. Two deadlines race a
+       * human turn — the orchestrator's TTL and this one — and when the
+       * orchestrator's wins, this timer is still pending for the remainder of the
+       * TTL. The replay CLI hid that by calling `process.exit()`, but a caller
+       * embedding `replay()` as a library inherited a process that would not exit
+       * for up to the whole TTL (two minutes by default) after an escalation had
+       * already returned.
+       */
+      if (typeof timer.unref === "function") timer.unref();
 
       this.handback = (signal) => {
         clearTimeout(timer);
@@ -695,38 +1117,59 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
    * default replay path — the one `scripts/verify-determinism.ts` diffs byte for
    * byte across two runs — is untouched by this entire mechanism.
    *
-   * `exposeBinding` throws on a second registration of the same name, hence the
-   * latch rather than an idempotent re-register.
+   * `exposeBinding` throws on a second registration of the same name, hence a
+   * latch per registration rather than an idempotent re-register.
+   *
+   * EACH PIECE LATCHES ONLY ONCE IT HAS ACTUALLY LANDED. A single `plumbed = true`
+   * set BEFORE the awaits — which is what this replaced — records the whole
+   * installation as complete the moment it STARTS, so a context that closes or a
+   * binding that rejects part way latches as done and is never retried, and every
+   * later `notice()` and `awaitHandback()` runs against half-installed plumbing
+   * that silently does nothing. Per-piece flags mean a retry re-registers only
+   * what is genuinely missing, which is also the only way a retry can be safe
+   * given `exposeBinding`'s own refusal to register a name twice.
+   *
+   * WHAT IS STILL NOT HANDLED, said rather than implied: nothing here retries on
+   * its own. A caller that swallows the rejection gets a driver with partial
+   * plumbing until it calls again. `runEscalation` does not swallow it — a throw
+   * out of `beginHumanTurn()` now propagates from inside its guarded region, so
+   * the lease is restored and journalled and the run fails loudly.
    */
   private async ensurePlumbing(): Promise<void> {
-    if (this.plumbed) return;
-    this.plumbed = true;
-
     const context: BrowserContext = this.page.context();
 
     // Node answers PER FRAME, which is the E5 correction made mechanical: the
     // binding hands us the calling frame, so the choice is made here with
     // `frame.name()` and `frame.url()` in hand rather than guessed in the page.
-    await context.exposeBinding("__meridianNotice", (source) => this.noticeFor(source.frame));
+    if (!this.noticeBound) {
+      await context.exposeBinding("__meridianNotice", (source) => this.noticeFor(source.frame));
+      this.noticeBound = true;
+    }
 
-    await context.exposeBinding("__meridianHandback", (_source, payload: unknown) => {
-      const p = (payload ?? {}) as { kind?: unknown; operator?: unknown; note?: unknown };
-      const note = typeof p.note === "string" ? p.note : undefined;
-      return this.signalHandback({
-        kind: p.kind === "aborted" ? "aborted" : "handed_back",
-        operator: typeof p.operator === "string" ? p.operator : "banner",
-        ...(note === undefined ? {} : { note }),
+    if (!this.handbackBound) {
+      await context.exposeBinding("__meridianHandback", (_source, payload: unknown) => {
+        const p = (payload ?? {}) as { kind?: unknown; operator?: unknown; note?: unknown };
+        const note = typeof p.note === "string" ? p.note : undefined;
+        return this.signalHandback({
+          kind: p.kind === "aborted" ? "aborted" : "handed_back",
+          operator: typeof p.operator === "string" ? p.operator : "banner",
+          ...(note === undefined ? {} : { note }),
+        });
       });
-    });
+      this.handbackBound = true;
+    }
 
-    await context.addInitScript(paintBanner);
+    if (!this.initScriptAdded) {
+      await context.addInitScript(paintBanner);
+      this.initScriptAdded = true;
+    }
   }
 
   /**
    * WHICH FRAME GETS THE BANNER — decided in Node, for the reason
-   * DECISIONS.md:74-79 records.
+   * DECISIONS.md records.
    *
-   * Name then url pattern, mirroring `resolveFrame` below, because a hardcoded
+   * Name then url pattern, mirroring `resolveFrame` above, because a hardcoded
    * name breaks on tenant B, whose `tenantB` config renames content/nav to
    * main/sidebar (mock/tenant.ts).
    *
@@ -736,6 +1179,28 @@ export class PlaywrightSurface implements Surface, LiveSession, HandbackChannel,
    * precisely the drift this system expects to meet; a human staring at a session
    * with no banner at all is worse than a banner in two places, so every
    * paintable frame gets one.
+   *
+   * ── NO PRODUCTION CALLER PASSES A TARGET ────────────────────────────────────
+   *
+   * Said outright, because everything above describes a selection that does not
+   * currently happen. The only paint on the production path is
+   * `beginHumanTurn()`'s, which calls `notice(text)` with no `NoticeTarget`; the
+   * orchestrator cannot supply one either, since `runEscalation` knows this
+   * object only as a `HumanTurnLock` (begin and end, nothing else). So in
+   * production the early return below is always taken and EVERY paintable frame
+   * gets a banner. The one caller anywhere that passes a target is
+   * `tests/handoff.integration.test.ts`.
+   *
+   * That is left as it is rather than wired up, and the reason is a real one
+   * rather than an excuse: choosing a frame needs the tenant's frame NAME, which
+   * lives in the binding, and the driver is deliberately the one layer that has
+   * never heard of a binding — `BoundSurface` sits above it precisely so the
+   * driver deals only in literals. Passing a `NoticeTarget` down would mean
+   * threading tenant configuration into the driver to improve where a banner is
+   * painted, which is a poor trade against painting it in every frame. The
+   * untargeted branch is a correct fallback, not a degraded one; what would be
+   * wrong is reading the code above and believing per-tenant placement is
+   * happening.
    */
   private noticeFor(frame: Frame): string | null {
     if (this.noticeText === null) return null;

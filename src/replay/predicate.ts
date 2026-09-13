@@ -36,8 +36,44 @@ export interface EvalContext {
   readonly params: Readonly<Record<string, string>>;
 }
 
-const substitute = (value: string, params: Readonly<Record<string, string>>): string =>
-  value.replace(/\{\{([a-z][a-z0-9_]*)\}\}/g, (whole, name: string) => params[name] ?? whole);
+/** One `{{param}}` interpolation, and what it could not fill in. */
+export interface Substitution {
+  readonly value: string;
+  /** Parameters the template named that the caller did not supply. */
+  readonly missing: readonly string[];
+}
+
+/**
+ * Interpolate `{{param}}` references, REPORTING what was missing instead of
+ * leaving the placeholder behind.
+ *
+ * The version this replaced was `params[name] ?? whole`, which silently left
+ * `{{note}}` in the string when no `note` was supplied. That is harmless-looking
+ * here and dangerous one layer up: the executor used the same fallback for
+ * `step.value`, so replay typed the literal seven characters `{{note}}` into a
+ * live form, and the step's own postcondition — `valueEquals ... "{{note}}"` —
+ * then confirmed it had done so. A template that cannot be filled is a question
+ * the artifact cannot answer, and both callers now have to decide what to do
+ * about it rather than being handed a plausible-looking string.
+ *
+ * Shared by this module and `executor.ts` deliberately: two interpolation rules
+ * would let a predicate and the action it guards disagree about what was typed.
+ */
+export const substituteParams = (
+  value: string,
+  params: Readonly<Record<string, string>>,
+): Substitution => {
+  const missing: string[] = [];
+  const out = value.replace(/\{\{([a-z][a-z0-9_]*)\}\}/g, (whole, name: string) => {
+    const supplied = params[name];
+    if (supplied === undefined) {
+      missing.push(name);
+      return whole;
+    }
+    return supplied;
+  });
+  return { value: out, missing };
+};
 
 /**
  * Data rows in the observation, header excluded.
@@ -45,22 +81,30 @@ const substitute = (value: string, params: Readonly<Record<string, string>>): st
  * Every rendered grid on this class of surface has exactly one header row, so
  * subtracting one per table gives the count a human means by "how many records".
  *
- * MEASURED 2026-09-12, AND THE ASSUMPTION DOES NOT HOLD AS USED. An observation
- * spans the whole frameset, so navigation chrome is counted too:
+ * RE-MEASURED 2026-09-13 against a mock started from `mock/main.ts` in this tree
+ * on an ephemeral port, driven through the real `PlaywrightSurface`. The table
+ * that stood here before was measured against an older mock and every one of its
+ * load-bearing claims is now false, so it is replaced rather than reworded:
  *
- *     search form ............ 2
- *     results, 1 match ....... 1
- *     results, 0 matches ..... 2   <- NOT 0; the empty render is itself a form
+ *                             dataRowCount   raw rows / tables   eq 0    gte 1
+ *     search form ...............  2              4 / 2          false   true
+ *     results, 1 match ..........  1              3 / 2          false   true
+ *     results, 0 matches ........  0              1 / 1          TRUE    false
  *
- * So `rowCount eq 0` never matches "NO RECORDS MATCH", and `gte 1` matches it as
- * readily as a genuine hit. Every rowCount predicate on this surface is therefore
- * unreliable, and the committed `lookup@1.0.0` checkpoint (`eq 1`) classifies a
- * not-found as a hard failure instead of the business outcome it is.
+ * So on this surface `rowCount eq 0` DOES match "NO RECORDS MATCH SELECTION",
+ * `gte 1` does NOT match it, and the empty render is not "itself a form" — it is
+ * one table carrying one header row. The committed `lookup@1.0.0` checkpoint
+ * (`eq 1`) is consistent with that, and the committed not-found replay records
+ * `business_outcome`, not a hard failure.
  *
- * THE FIX IS THE `grid` FIELD THE SCHEMA ALREADY REQUIRES AND THIS FUNCTION
- * IGNORES: the count must be scoped to the declared grid rather than taken across
- * the page. That needs a grid target and a way to count within it, so it lands
- * with the app profile and the outcome table, not here.
+ * WHAT IS STILL TRUE, AND IS THE REAL LIMITATION: the count is taken PAGE-WIDE.
+ * An observation spans the whole frameset, so this number is "data rows visible
+ * anywhere right now", not "rows in the grid the atom names". The `grid` field
+ * the schema requires is IGNORED by the arm below — scoping it needs a
+ * Surface-level way to count within a named region, which does not exist. The
+ * search form scoring 2 is exactly that limitation showing: those rows are form
+ * chrome, not records. Rather than hide it, the rowCount arm now says so in its
+ * own `observed` string, and the schema documents the matching exemption.
  *
  * Exported so the discovery executor records row counts with THIS function. A
  * second counting rule in the compiler would let an artifact assert a number the
@@ -80,14 +124,38 @@ const evaluateAtom = async (atom: Atom, obs: Observation, ctx: EvalContext): Pro
       return { kind: "screen", ok: obs.screen === atom.is, expected: `screen ${atom.is}`, observed: `screen ${observed}` };
     }
     case "text": {
-      const needle = substitute(atom.contains, ctx.params);
+      const { value: needle, missing } = substituteParams(atom.contains, ctx.params);
+      if (missing.length > 0) {
+        // A template that could not be filled is not a comparison that failed —
+        // it is one that could not be made. Saying so is the difference between
+        // a debuggable predicate and a mysterious `false`.
+        return {
+          kind: "text",
+          ok: false,
+          expected: `text contains "${atom.contains}"`,
+          observed: `parameter(s) ${missing.join(", ")} were not supplied, so nothing could be compared`,
+        };
+      }
       const ok = obs.text.includes(needle);
       return { kind: "text", ok, expected: `text contains "${needle}"`, observed: ok ? "present" : "absent" };
     }
     case "rowCount": {
       const n = dataRowCount(obs);
       const ok = atom.op === "eq" ? n === atom.n : atom.op === "gte" ? n >= atom.n : n <= atom.n;
-      return { kind: "rowCount", ok, expected: `rows ${atom.op} ${atom.n}`, observed: `${n} row(s)` };
+      /**
+       * SAYING THE QUIET PART. `atom.grid` is not used to scope this count and
+       * cannot be — see `dataRowCount`. Rather than print a bare "3 row(s)" and
+       * let a reader assume the number came from the named grid, the observation
+       * states the scope it was actually taken at, and flags the symbol when
+       * nothing declares it.
+       */
+      const undeclared = ctx.targets.has(atom.grid) ? "" : ", which plan.targets does not declare";
+      return {
+        kind: "rowCount",
+        ok,
+        expected: `rows ${atom.op} ${atom.n} in ${atom.grid}`,
+        observed: `${n} data row(s) counted PAGE-WIDE, not scoped to ${atom.grid}${undeclared}`,
+      };
     }
     case "dialog": {
       const msg = obs.dialog?.message ?? "";
@@ -103,14 +171,36 @@ const evaluateAtom = async (atom: Atom, obs: Observation, ctx: EvalContext): Pro
     }
     case "absent": {
       const target = ctx.targets.get(atom.target);
-      if (!target) return { kind: "absent", ok: true, expected: `${atom.target} absent`, observed: "symbol not declared" };
+      /**
+       * AN UNDECLARED SYMBOL FAILS HERE, exactly as it does for `element` and
+       * `valueEquals`. It used to return ok:TRUE — the phantom-success hole in
+       * this file: "TERMINATED_BANNER is absent" was satisfied by nobody having
+       * declared TERMINATED_BANNER, so a predicate asserting that a dangerous
+       * control is gone passed BECAUSE the plan never said what it was. The two
+       * sibling arms eight lines above and below returned ok:false for the
+       * identical condition, so the three now agree.
+       *
+       * Not merely defensive: schema refinement 8 now rejects an undeclared
+       * symbol in any of the three atoms, so reaching this branch means the
+       * capability bypassed `parseCapability`. Failing loudly is the right answer
+       * to that, and an unreachable-but-correct branch costs nothing.
+       */
+      if (!target) return { kind: "absent", ok: false, expected: `${atom.target} declared`, observed: "symbol not declared" };
       const found = await ctx.surface.find(target).catch(() => null);
       return { kind: "absent", ok: found === null, expected: `${atom.target} absent`, observed: found ? "present" : "absent" };
     }
     case "valueEquals": {
       const target = ctx.targets.get(atom.target);
       if (!target) return { kind: "valueEquals", ok: false, expected: `${atom.target} declared`, observed: "symbol not declared" };
-      const want = substitute(atom.value, ctx.params);
+      const { value: want, missing } = substituteParams(atom.value, ctx.params);
+      if (missing.length > 0) {
+        return {
+          kind: "valueEquals",
+          ok: false,
+          expected: `${atom.target} = "${atom.value}"`,
+          observed: `parameter(s) ${missing.join(", ")} were not supplied, so nothing could be compared`,
+        };
+      }
       const got = await ctx.surface.read(target).catch(() => null);
       return { kind: "valueEquals", ok: got === want, expected: `${atom.target} = "${want}"`, observed: got === null ? "unreadable" : `"${got}"` };
     }

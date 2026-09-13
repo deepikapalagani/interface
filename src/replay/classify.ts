@@ -72,13 +72,24 @@ export interface ClassifyInput {
 export const classify = async (input: ClassifyInput, ctx: EvalContext): Promise<Classification> => {
   const { observation, capability, expectation, usedRecoveries } = input;
 
-  // 1. A declared, transient obstruction — cleared before anything is judged.
+  /**
+   * 1. A declared, transient obstruction — cleared before anything is judged.
+   *
+   * A rule whose budget is SPENT is remembered rather than merely skipped. The
+   * previous version `continue`d before evaluating, so once a rule was exhausted
+   * the engine could no longer tell "a dialog nobody anticipated" from "the
+   * dialog we declared, still there after we tried". Those are different facts
+   * about the application and they produce different failure kinds below.
+   */
+  let exhausted: { readonly ruleId: string; readonly evidence: PredicateResult } | null = null;
   for (const rule of capability.plan.recovery) {
-    if (usedRecoveries.filter((r) => r === rule.id).length >= rule.maxAttempts) continue;
     const evidence = await evaluatePredicate({ all: [rule.when], any: [] }, observation, ctx);
-    if (evidence.ok) {
-      return { kind: "recoverable", ruleId: rule.id, action: rule.do, maxAttempts: rule.maxAttempts, evidence };
+    if (!evidence.ok) continue;
+    if (usedRecoveries.filter((r) => r === rule.id).length >= rule.maxAttempts) {
+      exhausted ??= { ruleId: rule.id, evidence };
+      continue;
     }
+    return { kind: "recoverable", ruleId: rule.id, action: rule.do, maxAttempts: rule.maxAttempts, evidence };
   }
 
   // 2. A declared terminal answer. This is the branch whose absence causes the
@@ -101,15 +112,28 @@ export const classify = async (input: ClassifyInput, ctx: EvalContext): Promise<
     const evidence = await evaluatePredicate(expectation, observation, ctx);
     if (evidence.ok) return { kind: "expected", evidence };
 
-    // An undeclared dialog is its own failure kind: it is the case where the
-    // surface is blocked by something nobody anticipated, and it must never be
-    // auto-dismissed into a phantom success.
+    /**
+     * A dialog is blocking. WHICH failure that is depends on whether anything
+     * declared it:
+     *
+     *   nothing declared it   `undeclared_dialog` — the surface is blocked by
+     *                         something nobody anticipated, and it must never be
+     *                         auto-dismissed into a phantom success.
+     *   a rule declared it,   the engine did what the artifact told it to and the
+     *   and is exhausted      condition outlasted the attempts. Calling that
+     *                         "undeclared" would be a false statement about the
+     *                         artifact, and would send a reader looking for a
+     *                         rule that is sitting right there in plan.recovery.
+     */
     if (observation.dialog) {
       return {
         kind: "hard_failure",
-        failureKind: "undeclared_dialog",
+        failureKind: exhausted === null ? "undeclared_dialog" : "postcondition_failed",
         expected: evidence.summary,
-        observed: `an undeclared dialog is blocking: "${observation.dialog.message}"`,
+        observed:
+          exhausted === null
+            ? `an undeclared dialog is blocking: "${observation.dialog.message}"`
+            : `a DECLARED dialog is still blocking after recovery "${exhausted.ruleId}" exhausted its attempts: "${observation.dialog.message}"`,
         evidence,
       };
     }

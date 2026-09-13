@@ -101,6 +101,38 @@ describe("predicate evaluation", () => {
     expect(one.ok).toBe(true);
   });
 
+  it("says out loud that the row count is PAGE-WIDE and ignores the grid it names", async () => {
+    // `atom.grid` is required by the schema and used by nothing: `dataRowCount`
+    // counts every data row in the observation, which spans the whole frameset.
+    // The evaluator cannot scope it, so the one thing it can do is refuse to let
+    // a reader assume it did — otherwise a bare "1 row(s)" reads as a measurement
+    // of RESULTS that was never taken.
+    const scoped = await evaluatePredicate(
+      { all: [{ atom: "rowCount", grid: "RESULTS", op: "gte", n: 1 }], any: [] },
+      obs({ nodes: grid(2) }),
+      ctx(new Stub([obs()])),
+    );
+    expect(scoped.ok).toBe(true);
+    const atom = scoped.atoms[0];
+    expect(atom?.expected).toBe("rows gte 1 in RESULTS");
+    expect(atom?.observed).toContain("PAGE-WIDE");
+    expect(atom?.observed).toContain("not scoped to RESULTS");
+    // This context declares only MEMBER_ID, so the grid symbol is undeclared and
+    // the observation has to say so too.
+    expect(atom?.observed).toContain("which plan.targets does not declare");
+  });
+
+  it("a failing rowCount still reports the page-wide scope, so the number is not mistaken for the grid's", async () => {
+    const missed = await evaluatePredicate(
+      { all: [{ atom: "rowCount", grid: "RESULTS_GRID", op: "eq", n: 0 }], any: [] },
+      obs({ nodes: grid(3) }),
+      ctx(new Stub([obs()])),
+    );
+    expect(missed.ok).toBe(false);
+    expect(missed.summary).toContain("rows eq 0 in RESULTS_GRID");
+    expect(missed.summary).toContain("3 data row(s) counted PAGE-WIDE");
+  });
+
   it("substitutes {{param}} references before comparing", async () => {
     const r = await evaluatePredicate(
       { all: [{ atom: "text", contains: "{{member_id}}" }], any: [] },
@@ -127,6 +159,54 @@ describe("predicate evaluation", () => {
     );
     expect(r.ok).toBe(false);
     expect(r.summary).toContain("not declared");
+  });
+
+  it("THE TWIN: `absent` fails on an undeclared symbol too, rather than passing because nobody declared it", async () => {
+    // The phantom-success hole this pins. `absent` used to return ok:TRUE for an
+    // undeclared symbol while `element present:false` — the identical question,
+    // eight lines away in the same switch — returned ok:false. So "the danger is
+    // gone" was satisfied by the plan never having said what the danger was.
+    const r = await evaluatePredicate(
+      { all: [{ atom: "absent", target: "NOT_DECLARED" }], any: [] },
+      obs(),
+      ctx(new Stub([obs()])),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.summary).toContain("not declared");
+
+    // And the two atoms are pinned to the SAME behaviour, so they cannot drift
+    // apart again: both fail, and both say why in the same words.
+    const sibling = await evaluatePredicate(
+      { all: [{ atom: "element", target: "NOT_DECLARED", present: false }], any: [] },
+      obs(),
+      ctx(new Stub([obs()])),
+    );
+    expect(sibling.ok).toBe(r.ok);
+    expect(sibling.atoms[0]?.observed).toBe(r.atoms[0]?.observed);
+  });
+
+  it("a declared symbol that really is gone still satisfies `absent`", async () => {
+    // The complement, so the fix above is a correction and not a blanket refusal:
+    // MEMBER_ID is declared, and this surface finds nothing.
+    const r = await evaluatePredicate(
+      { all: [{ atom: "absent", target: "MEMBER_ID" }], any: [] },
+      obs(),
+      ctx(new Stub([obs()], null)),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("refuses to compare when a {{param}} was never supplied, instead of matching the template text", async () => {
+    // `substituteParams` used to leave `{{member_id}}` in place, so this predicate
+    // asked whether the screen literally contained the characters "{{member_id}}".
+    const r = await evaluatePredicate(
+      { all: [{ atom: "text", contains: "{{member_id}}" }], any: [] },
+      obs({ text: "MEMBER {{member_id}} ABERNATHY" }),
+      ctx(new Stub([obs()]), {}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.summary).toContain("member_id");
+    expect(r.summary).toContain("were not supplied");
   });
 
   it("all must every hold; any needs one; an empty any is satisfied", async () => {

@@ -1,5 +1,5 @@
 /**
- * THE DISCOVERY TOOL SURFACE — eight tools, and one rule that shapes all of them.
+ * THE DISCOVERY TOOL SURFACE — seven tools, and one rule that shapes all of them.
  *
  * THE MODEL NEVER NAMES A SELECTOR. It points at a `ref` from the observation it
  * was just shown, restates the `screen_id` it believes it is on, and says in one
@@ -20,6 +20,16 @@
  *
  * Tools are frozen and sorted by name so the prompt prefix is byte-stable across
  * turns, which is what makes prompt caching possible at all.
+ *
+ * THERE IS NO `screenshot` TOOL, and its absence is deliberate. One was declared
+ * and described to the model as "request an image of the screen"; the executor
+ * answered it with the same text observation `observe` returns, because the wire
+ * format between the loop and the provider carries strings only and no image ever
+ * reached the model. An affordance that silently does something other than what
+ * its description promises is worse than a missing one — it burns a turn, and the
+ * model has no way to learn that looking harder is not available. Vision-based
+ * perception is a real gap and is recorded as a cut, not papered over with a tool
+ * that pretends.
  */
 import { z } from "zod";
 import type { ToolSpec } from "../model/provider.js";
@@ -34,9 +44,6 @@ const whyStable = z
 
 export const ToolArgs = {
   observe: z.object({}),
-  screenshot: z.object({
-    reason: z.string().min(1).describe("Why the text observation was not enough."),
-  }),
   click: z.object({ ref, screen_id: screenId, why_stable: whyStable }),
   type_text: z.object({
     ref,
@@ -69,7 +76,7 @@ export const TERMINAL_TOOLS: readonly ToolName[] = ["finish", "stuck"];
 
 /**
  * JSON Schema for the wire, written alongside the Zod schema rather than
- * generated, to avoid a dependency for eight tiny objects. `tools.test.ts` pins
+ * generated, to avoid a dependency for seven tiny objects. `tools.test.ts` pins
  * the two together so they cannot drift apart silently.
  */
 const str = (description: string) => ({ type: "string", description });
@@ -132,16 +139,6 @@ const SPECS: Record<ToolName, ToolSpec> = {
         as: str("A short snake_case name for this value."),
       },
       required: ["ref", "screen_id", "why_stable", "as"],
-      additionalProperties: false,
-    },
-  },
-  screenshot: {
-    name: "screenshot",
-    description: "Request an image of the screen. Use only when the text observation is not enough.",
-    parameters: {
-      type: "object",
-      properties: { reason: str("Why the text observation was not enough.") },
-      required: ["reason"],
       additionalProperties: false,
     },
   },

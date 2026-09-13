@@ -56,14 +56,36 @@ export type SideEffectRisk = "none" | "unknown" | "committed";
 /**
  * Closed set of hard-failure kinds.
  *
- * The plan called for 12; this is 15 because the same plan separately named the
- * three escalation outcomes, which have to live somewhere and are failures by
- * definition. Every member is a distinct thing a caller or an on-call engineer
- * would act on differently — that is the bar for adding one.
+ * The plan called for 12; this is 16. Three of the extras are the escalation
+ * outcomes, which the same plan named separately and which are failures by
+ * definition. The sixteenth is `contract_violation`, added when the executor
+ * gained two ways to discover that the ARTIFACT and the RUN disagree. Every
+ * member is a distinct thing a caller or an on-call engineer would act on
+ * differently — that is the bar for adding one.
  */
 export type FailureKind =
   /** Caller's arguments failed the capability's own input schema. Never touches the UI. */
   | "input_schema_violation"
+  /**
+   * The capability's own contract was violated — by the ARTIFACT or the
+   * invocation, not by the caller's arguments and not by the application.
+   *
+   * Two live producers, both in `runSteps`:
+   *   - a declared output was never populated, or the value read back could not
+   *     be coerced to the type `contract.outputs[].type` declares;
+   *   - a step interpolates `{{name}}` and no such parameter reached the
+   *     executor, so the alternatives were to type the literal text `{{name}}`
+   *     into a live application or to refuse. It refuses.
+   *
+   * DISTINCT FROM `postcondition_failed`, which would tell a caller the
+   * application misbehaved and send an engineer to look at the app. Here the app
+   * did nothing wrong.
+   *
+   * DISTINCT FROM `input_schema_violation`, whose contract is that it never
+   * touched the UI. These are raised mid-run, after steps have executed, so they
+   * must not borrow a kind that promises otherwise.
+   */
+  | "contract_violation"
   /** The step's precondition never became true (wrong screen, missing anchor). */
   | "precondition_failed"
   /** No strategy in the chain resolved the target, or more than one did. */
@@ -159,7 +181,27 @@ export interface ResultEnvelope {
 
 export interface ReplaySuccess extends ResultEnvelope {
   readonly status: "success";
-  /** The capability's declared outputs, already validated against its schema. */
+  /**
+   * The capability's declared outputs.
+   *
+   * BE PRECISE ABOUT WHAT IS GUARANTEED HERE, because this comment used to read
+   * "already validated against its schema" and nothing anywhere validated
+   * anything: the executor wrote the raw string it read off the screen and
+   * `Output.type` had no consumer in the repo.
+   *
+   * What IS now enforced, at the read site in `runSteps` and again after the step
+   * loop, and what a `success` therefore means:
+   *   - PRESENCE — every output the contract declares was populated by its
+   *     producing step. A run that reached its checkpoint with a declared output
+   *     missing is a `contract_violation`, not a success.
+   *   - DECLARED TYPE — the value read back was coerced to `Output.type`
+   *     (string | integer | boolean) or the run failed. So an `integer` output
+   *     arrives as a number here, not as the digits that were on screen.
+   *
+   * What is NOT enforced, and is not implied: `Output.sensitivity` has no
+   * consumer anywhere in the system. It is documentation for a reviewer, and it
+   * does not cause this value to be redacted, masked, or withheld.
+   */
   readonly outputs: Readonly<Record<string, unknown>>;
   /** Each checkpoint clause with what was expected and what was seen. */
   readonly checkpoint: readonly Evidence[];

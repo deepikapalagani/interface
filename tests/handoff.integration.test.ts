@@ -30,14 +30,35 @@
  * lease, the driver's turn lock, the gate, the banner plumbing, the hand-back
  * channel — is the production one.
  *
- * WHAT STILL NEEDS A PERSON, and is therefore not asserted here: that the banner
- * actually RENDERS legibly, and that a finger on HAND BACK feels right. Those are
- * the operator-UI half §3.6 explicitly permits to be mocked. What is asserted is
- * everything underneath them.
+ * THE BANNER IS ASSERTED HERE, AND THIS SUITE CANNOT CATCH THE BUG THAT BROKE IT.
+ * Both halves are measured, and the second matters more than the first.
+ *
+ * Asserted below: the banner reaches the page through the ordinary perception
+ * path, and it goes away again on hand-back.
+ *
+ * NOT pinned: the failure that actually shipped. The in-page banner died in every
+ * frame with `ReferenceError: __name is not defined` — esbuild's keep-names
+ * transform rewrites a nested named function, and `__name` does not exist in the
+ * page — which makes it a property of the TRANSPILER rather than of the banner.
+ * `tsx` sets `keepNames: true` and runs every production entry point in
+ * package.json; vite, which vitest uses, sets `keepNames: false`. MEASURED on
+ * this tree: restore the old nested `const render =` body and THIS FILE still
+ * passes 4/4, while the same source under `tsx` reports the banner absent in all
+ * three frames and logs the ReferenceError once per frame. A keep-names-only
+ * regression is therefore green here and broken in production. What guards it is
+ * the rule stated on `paintBanner` in `src/surface/playwright.ts` and the
+ * per-frame failure `notice()` now LOGS instead of swallowing; closing it
+ * mechanically needs a check that runs under `tsx`, which does not exist yet.
+ *
+ * WHAT STILL GENUINELY NEEDS A PERSON: whether the banner is LEGIBLE — placement,
+ * contrast, whether it covers a field the operator needs — and whether a finger
+ * on HAND BACK feels right. Those are the operator-UI half §3.6 explicitly
+ * permits to be mocked.
  *
  * Headless, no model, no key. This runs in CI.
  */
 import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -54,37 +75,46 @@ import { PlaywrightSurface } from "../src/surface/playwright.js";
 import type { HandbackSignal } from "../src/surface/session.js";
 import { SurfaceRefused, type ActionContext } from "../src/surface/types.js";
 
-const PORT = 7109;
-const ENTRY = `http://localhost:${PORT}/`;
+/**
+ * AN EPHEMERAL PORT, NOT A FIXED ONE.
+ *
+ * This suite used to bind 7109. A hardcoded port is green on a clean machine and
+ * fails on a busy one — and it fails badly, because `server.listen` here has no
+ * error handler, so an EADDRINUSE surfaces as an unhandled rejection rather than
+ * as "the port was taken". Worse, it can bind a port some OTHER process owns and
+ * then drive a browser against whatever that process serves.
+ *
+ * Port 0 asks the OS for a free port, which is what `tests/mock-app.test.ts` and
+ * `scripts/demo.ts` already do. `ENTRY` is therefore only knowable after the
+ * listen, so it and the two policies built from it are assigned in `beforeAll`.
+ */
+let ENTRY = "";
 const MEMBER = "400200101";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const load = (name: string): unknown => JSON.parse(readFileSync(path.join(here, "fixtures", name), "utf8"));
 
-const base = {
+const policyBase = (entry: string) => ({
   version: "1.0.0",
-  allowedOrigins: [ENTRY.replace(/\/$/, "")],
+  allowedOrigins: [entry.replace(/\/$/, "")],
   deniedRoutes: ["/__admin"],
   allowedActions: ["navigate", "click", "fill", "press", "dismiss_dialog"],
   riskHandling: { read_only: "allow", reversible: "allow", irreversible: "confirm" },
   caps: { maxSteps: 40, maxRunSeconds: 60 },
-};
+});
 
 /** The shipped policy: nothing on this capability escalates. */
-const permissive = PolicyDocument.parse({ ...base, screenRules: [] });
+let permissive: PolicyDocument;
 
 /**
  * The demo policy, in the same shape as `tests/fixtures/policy-escalate.json`.
  *
  * The artifact stays truthfully `read_only` and the POLICY rates the screen
- * riskier — the `riskDrift` case policy.ts:123-124 exists for. That is how this
+ * riskier — the `riskDrift` case `resolveRisk` exists for. That is how this
  * suite reaches the escalation path WITHOUT lying in an artifact and WITHOUT a
  * mutating route, neither of which this mock has.
  */
-const escalating = PolicyDocument.parse({
-  ...base,
-  screenRules: [{ screen: "MEMBER_SEARCH", risk: "irreversible" }],
-});
+let escalating: PolicyDocument;
 
 let server: Server;
 let capability: Capability;
@@ -151,7 +181,17 @@ beforeAll(async () => {
   submitTarget = submit;
 
   server = createServer(tenantA);
-  await new Promise<void>((r) => server.listen(PORT, r));
+  await new Promise<void>((r) => server.listen(0, r));
+  ENTRY = `http://localhost:${(server.address() as AddressInfo).port}/`;
+
+  // Built here rather than at module scope: the origin is not knowable until the
+  // OS has handed out a port, and an allowlist naming the wrong origin would
+  // deny every action in the suite.
+  permissive = PolicyDocument.parse({ ...policyBase(ENTRY), screenRules: [] });
+  escalating = PolicyDocument.parse({
+    ...policyBase(ENTRY),
+    screenRules: [{ screen: "MEMBER_SEARCH", risk: "irreversible" }],
+  });
 }, 60000);
 
 afterAll(() => {
@@ -197,10 +237,29 @@ describe("§3.6 handoff: the human operates the same live session", () => {
       expect(lease.holder).toBe("human");
 
       await driver.beginHumanTurn();
-      await driver.notice(`RUN ${capability.contract.id} PAUSED — you have control. Complete step s02, then press HAND BACK.`, {
+      const NOTICE = `RUN ${capability.contract.id} PAUSED — you have control. Complete step s02, then press HAND BACK.`;
+      await driver.notice(NOTICE, {
         frameName: binding.frames.content,
         urlPattern: "/screen/",
       });
+
+      /**
+       * THE BANNER IS ON SCREEN — asserted through `observe()`, the same
+       * perception path every other step uses, because the banner is appended to
+       * the frame's body and therefore shows up in the page text a human would
+       * read.
+       *
+       * SCOPED, because the obvious reading is wrong: this pins that the paint
+       * path works UNDER THIS RUNNER. It would not have caught the failure that
+       * shipped — `ReferenceError: __name is not defined`, swallowed by a bare
+       * `.catch` — because that error exists only when the transpiler sets
+       * `keepNames`, which `tsx` does for every production entry point and vite
+       * does not for this suite. Measured both ways; the file header carries the
+       * numbers.
+       */
+      const painted = await driver.observe();
+      expect(painted.text).toContain("PAUSED — you have control");
+      expect(painted.text).toContain("HAND BACK");
 
       /* ---- 4. while the human holds it: two independent refusals ------------- */
 
@@ -246,6 +305,14 @@ describe("§3.6 handoff: the human operates the same live session", () => {
 
       /* ---- 6. hand back ------------------------------------------------------ */
       await driver.endHumanTurn();
+
+      // ...AND THE BANNER IS GONE. The complement of the assertion above, and
+      // what makes it non-vacuous: a test that only ever checked for presence
+      // would pass against a banner painted once and never cleared, which would
+      // leave an operator being told they hold a session automation has taken
+      // back.
+      const cleared = await driver.observe();
+      expect(cleared.text).not.toContain("PAUSED — you have control");
       lease.reclaim("operator handed back");
       expect(lease.epoch).toBe(2);
       expect(lease.holder).toBe("automation");

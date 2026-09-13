@@ -26,7 +26,7 @@
  *     the model-call count, which is zero by construction).
  */
 import { UnboundSymbol, resolve, type Binding } from "../capability/bind.js";
-import type { Capability } from "../capability/schema.js";
+import { referencedParams, type Capability } from "../capability/schema.js";
 import type {
   ControlOwner,
   DegradationRecord,
@@ -38,6 +38,7 @@ import type {
 import type { Escalate } from "../control/escalation.js";
 import type { ControlLease } from "../control/lease.js";
 import type { EventSequencer } from "../evidence/events.js";
+import type { HandoffRecord } from "../evidence/log.js";
 import type { Surface } from "../surface/types.js";
 import { runSteps, type RunReport } from "./executor.js";
 
@@ -62,6 +63,14 @@ export interface ReplayDeps {
    * person (`escalation_timeout`) rather than that the action was forbidden.
    */
   readonly escalate?: Escalate;
+  /**
+   * Where a completed human turn's record goes (§3.6-d).
+   *
+   * Handed to the CALLER rather than written from in here, because `replay()`
+   * owns no filesystem and knows no evidence directory — the CLI does. See
+   * `HANDOFF_BUNDLE` below for what that means for the pointer in the result.
+   */
+  readonly onHandoff?: (record: HandoffRecord) => void;
 }
 
 export interface InputIssue {
@@ -81,14 +90,47 @@ export const validateInputs = (
 ): InputIssue[] => {
   const issues: InputIssue[] = [];
 
+  /**
+   * A pattern constrains the WHOLE value, which is what an artifact author
+   * means by `^\d{9}$` and what an unanchored test does not deliver.
+   *
+   * MEASURED: `new RegExp("\\d{9}").test("xx400200101yy")` is TRUE, so a
+   * capability whose `member_id` pattern was written without anchors accepted
+   * `xx400200101yy` and that value reached `surface.fill` — the input gate
+   * reporting a pass on a value the artifact's own contract excludes. Wrapping
+   * rather than requiring anchors in the schema keeps every existing artifact
+   * valid: an already-anchored `^\d{9}$` becomes `^(?:^\d{9}$)$`, which matches
+   * exactly what it did before.
+   */
+  const anchored = (pattern: string): RegExp => new RegExp(`^(?:${pattern})$`);
+
+  /**
+   * An input the PLAN INTERPOLATES is not optional, whatever it says.
+   *
+   * `required: false` means the caller may omit it; it does not mean the plan
+   * can cope without it. A step whose value is `{{note}}` has nothing to type
+   * when `note` is absent, and the executor's only alternatives are to refuse
+   * mid-run or to type the literal characters `{{note}}` into the application.
+   * Catching it HERE keeps that decision pre-flight, which is what lets
+   * `input_schema_violation` go on truthfully saying it never touched the UI.
+   */
+  const referenced = referencedParams(capability);
+
   for (const input of capability.contract.inputs) {
     const value = params[input.name];
 
     if (value === undefined || value === "") {
-      if (input.required) issues.push({ name: input.name, problem: "required but not supplied" });
+      if (input.required) {
+        issues.push({ name: input.name, problem: "required but not supplied" });
+      } else if (referenced.has(input.name)) {
+        issues.push({
+          name: input.name,
+          problem: "declared optional, but the plan interpolates {{" + input.name + "}}, so the run cannot proceed without it",
+        });
+      }
       continue;
     }
-    if (input.pattern && !new RegExp(input.pattern).test(value)) {
+    if (input.pattern && !anchored(input.pattern).test(value)) {
       issues.push({ name: input.name, problem: `does not match ${input.pattern}` });
     }
     if (input.type === "enum" && input.enumValues && !input.enumValues.includes(value)) {
@@ -152,6 +194,20 @@ const citedClause = (capability: Capability, issues: readonly InputIssue[]): str
  * pointing at nothing. A run that handed the session to a person is exactly the
  * run where an expected/observed pair is not enough, and the control transfer is
  * written to this file in the run's own directory.
+ *
+ * AND THE SAME DEFECT EXISTED ONE LEVEL OUT, which the paragraph above was
+ * cheerfully unaware of: giving the field a producer pointed it at a filename
+ * NOTHING WROTE. `EvidenceWriter.handoff()` existed and no production caller
+ * ever invoked it, so every escalating run stamped `bundle: "handoff.jsonl"`
+ * onto its result and left no such file. `replay/main.ts` now collects the
+ * records through `ReplayDeps.onHandoff` and writes them.
+ *
+ * BE EXACT ABOUT WHAT IS AND IS NOT GUARANTEED: this pointer is relative to the
+ * run directory, and it is true for the CLI. `replay()` itself owns no
+ * filesystem, so a LIBRARY caller that supplies no `onHandoff` — or supplies one
+ * and discards what it is handed — will leave the pointer dangling. That is why
+ * the records are handed out rather than written from in here: the layer that
+ * chose the directory is the only one that can honour the reference.
  */
 const HANDOFF_BUNDLE = "handoff.jsonl";
 
@@ -312,6 +368,7 @@ export const replay = async (
     // An absent orchestrator is absent, not `undefined`: exactOptionalPropertyTypes
     // draws that distinction and the conditional spread respects it.
     ...(deps.escalate === undefined ? {} : { escalate: deps.escalate }),
+    ...(deps.onHandoff === undefined ? {} : { onHandoff: deps.onHandoff }),
   });
 
   const full = envelope(capability, binding, deps, report, deps.lease.holder);

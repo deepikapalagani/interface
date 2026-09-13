@@ -31,7 +31,18 @@ describe("tool specs", () => {
     const zodNames = Object.keys(ToolArgs).sort();
     const wireNames = TOOL_SPECS.map((s) => s.name).sort();
     expect(wireNames).toEqual(zodNames);
-    expect(TOOL_SPECS).toHaveLength(8);
+    expect(TOOL_SPECS).toHaveLength(7);
+  });
+
+  it("offers NO screenshot tool, because no image ever reached the model", () => {
+    // It was declared and described as "request an image of the screen", and the
+    // executor answered it with the same text observation `observe` returns — the
+    // wire format between the loop and the provider carries strings only. A tool
+    // whose description promises something its implementation cannot do burns a
+    // turn and teaches the model nothing. Vision is recorded as a cut instead.
+    expect(TOOL_SPECS.map((s) => s.name)).not.toContain("screenshot");
+    expect(Object.keys(ToolArgs)).not.toContain("screenshot");
+    expect(parseToolArgs("screenshot", { reason: "the text was not enough" }).ok).toBe(false);
   });
 
   it("the two declarations agree on every tool's arguments — the anti-drift pin", () => {

@@ -8,13 +8,18 @@
  *   manifest.json versions, target, result, and the model-call count
  *   handoff.jsonl the human turns, on a run that escalated (absent otherwise)
  *
- * JSON Lines rather than one document, because a run that crashes half way
- * should still leave readable evidence up to the point it stopped.
+ * JSON Lines rather than one document, so that a run which crashes half way
+ * leaves readable evidence up to the point it stopped — which requires the lines
+ * to be APPENDED AS THEY HAPPEN, not serialised at the end. That is a property
+ * of the caller, not of the format: wire `LogContext.sink` to `event()` and it
+ * holds. `replay/main.ts` does. It did not before, and the format alone bought
+ * nothing.
  *
  * The manifest exists for one assertion in particular: `model.calls` on a replay
  * run must be zero, and a reviewer should be able to see that in a file rather
  * than take it on trust.
  */
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { redactDeep } from "../safety/redact.js";
@@ -29,7 +34,19 @@ export interface RunManifest {
   readonly target: string;
   readonly tenant: string;
   readonly capability?: { readonly id: string; readonly version: string };
-  /** sha256 of the artifact this run used or produced, so the two can be tied together. */
+  /**
+   * sha256 of the EXACT BYTES this run wrote to `capability.json`, so a reviewer
+   * can tie the manifest to the artifact by running `shasum -a 256` on the file
+   * beside it and comparing.
+   *
+   * Produced by `artifact()`, which returns the digest of what it wrote — the
+   * hash cannot drift from the file because it is taken from the same string.
+   *
+   * STAYS OPTIONAL: the five committed run manifests predate it and are frozen
+   * evidence, so requiring it would fail the graded tree. A field with no writer
+   * is exactly the defect this one was: before now `grep -rn artifactContentHash`
+   * returned one hit, its own declaration.
+   */
   readonly artifactContentHash?: string;
   /** Zero on every replay run, by construction. */
   readonly model: { readonly provider: string; readonly calls: number };
@@ -87,19 +104,52 @@ export class EvidenceWriter {
     return this.dir;
   }
 
-  /** Append one event. Called as the run goes, so a crash still leaves a trail. */
+  /**
+   * Append ONE event, redacted, the moment it is emitted.
+   *
+   * "Called as the run goes" is true only when something calls it as the run
+   * goes. Wire `LogContext.sink` to this method and it is; the CLI does, which
+   * is what makes the module header's crash-resilience claim hold. Called from
+   * the bulk `events()` flush alone — as it was until now — it is a flush.
+   *
+   * REDACTED HERE, because this is the last boundary before bytes hit disk and
+   * events.jsonl was the ONE evidence file written unredacted. The handoff
+   * record and both discovery files already redact on the way out; this did not,
+   * while `predicate.ts` renders a value read off the screen into an event's
+   * `observed` field and discovery puts the model's raw prose into `why.stated`.
+   *
+   * `redacted: true` is stamped only when masking CHANGED the serialised line,
+   * by comparing before and after. A flag set unconditionally would say nothing;
+   * this one distinguishes a line that carried something sensitive from a line
+   * that did not.
+   */
   event(e: LogEvent): void {
-    appendFileSync(path.join(this.dir, "events.jsonl"), `${JSON.stringify(e)}\n`, "utf8");
+    const before = JSON.stringify(e);
+    const after = JSON.stringify(redactDeep(e));
+    const line = before === after ? before : JSON.stringify({ ...(JSON.parse(after) as LogEvent), redacted: true });
+    appendFileSync(path.join(this.dir, "events.jsonl"), `${line}\n`, "utf8");
   }
 
   /**
-   * Flush a run's whole log.
+   * Flush a run's whole log, for a caller that did NOT stream it.
    *
    * MEASURED DEFECT, fixed at the SOURCE rather than here: a replay rejected by
    * input validation reached this with an empty array, so `appendFileSync` never
    * ran and events.jsonl was ABSENT — the failing run left less evidence than the
-   * successful one. `replay()` now logs its pre-flight rejections, so the array
-   * is never empty on that path.
+   * successful one. `replay()` now logs its pre-flight rejections.
+   *
+   * BE EXACT ABOUT WHAT THAT FIXED, because the previous wording read as though
+   * the invariant now held generally. It covers the TWO PRE-FLIGHT ARMS in
+   * `replay/index.ts` — the input rejection and the binding gap — and nothing
+   * else. The classes it did NOT cover were real and were reachable: a policy
+   * refusal or an unresolvable target on the FIRST step returned a typed failure
+   * while emitting nothing at all, so the run directory held only
+   * capability.json and manifest.json and the project's own
+   * `scripts/verify-evidence.ts` rejected it. Those are closed now, but by
+   * `runSteps.fail()` emitting a line for every hard failure — not by anything
+   * in this file. What remains uncovered here is a run that throws before any
+   * emit at all; the CLI answers that by streaming through `event()` and by
+   * flushing in a `finally`.
    *
    * Deliberately NOT fixed by writing a zero-line file, which would pass an
    * existence check while still saying nothing (verify-evidence rejects an empty
@@ -163,8 +213,20 @@ export class EvidenceWriter {
     this.writeLines("handoff.jsonl", records.map(redactDeep));
   }
 
-  artifact(capability: unknown): void {
-    writeFileSync(path.join(this.dir, "capability.json"), `${JSON.stringify(capability, null, 1)}\n`, "utf8");
+  /**
+   * Write the artifact this run used, and RETURN the sha256 of exactly those
+   * bytes so the manifest can cite it.
+   *
+   * The digest is taken from the same string that is written, rather than
+   * recomputed by the caller from its own serialisation — that is what makes
+   * `manifest.artifactContentHash` checkable with `shasum -a 256 capability.json`
+   * instead of merely plausible. A caller that does not want it ignores the
+   * return value.
+   */
+  artifact(capability: unknown): string {
+    const body = `${JSON.stringify(capability, null, 1)}\n`;
+    writeFileSync(path.join(this.dir, "capability.json"), body, "utf8");
+    return createHash("sha256").update(body).digest("hex");
   }
 
   manifest(m: RunManifest): void {

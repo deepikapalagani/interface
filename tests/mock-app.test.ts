@@ -395,6 +395,41 @@ describe("the mutating route", () => {
     expect(await (await get(`screen/cards?id=${MEMBER}`)).text()).toContain(seeded ?? "«no pan»");
   });
 
+  it("every form action a screen renders is a routed path", async () => {
+    // SEC0100's form posted to /signon, which main.ts does not route, so the
+    // only control on the screen was a dead end onto the 404 render. Nothing
+    // navigates there, so it was never a blocked flow — but "the app's own
+    // controls go somewhere" is the sort of property that is cheap to pin and
+    // expensive to notice by hand, so it is pinned here rather than fixed once.
+    const seed = freshState();
+    const rose = seed.members[MEMBER];
+    if (!rose) throw new Error("the seed no longer holds member 400200101");
+    const noFault = { broadcast: false, confirmSubmit: false } as const;
+
+    const pages = [
+      screens.navFrame(tenantA),
+      screens.signOn(tenantA, CLOCK),
+      screens.search(tenantA, CLOCK),
+      screens.cardServices(tenantA, CLOCK, rose, null, noFault),
+    ];
+
+    const actions = new Set<string>();
+    for (const html of pages) {
+      for (const m of html.matchAll(/action="([^"]+)"/g)) {
+        const action = m[1];
+        if (action) actions.add(action);
+      }
+    }
+    expect(actions.size).toBeGreaterThan(0);
+
+    for (const action of actions) {
+      // GET on the mutating route answers 405 + SYS0405, which IS routed. Only
+      // the 404 render means nothing handles the path.
+      const body = textOf(await (await get(action)).text());
+      expect(body, `${action} should be routed, not fall through to the 404 render`).not.toContain("SYS0404");
+    }
+  });
+
   it("renders every audit field on /screen/audit", async () => {
     await freeze();
     const row = (await state()).audit[0];

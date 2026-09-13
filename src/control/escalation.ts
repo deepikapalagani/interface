@@ -31,11 +31,21 @@
  *
  * ── ONE ENFORCEMENT POINT HERE, NOT TWO ─────────────────────────────────────
  *
- * Said plainly because the neighbouring header overstates it: while a human holds
- * the session there are two refusals in this system — `ControlLease` (via the
- * gate) and the driver's own human-turn lock (`LiveSession.beginHumanTurn`,
- * armed below BEFORE any banner is painted, so a banner that fails to render
- * still leaves the session locked). They share no state, which is the point. The
+ * Said plainly, and scoped to the configuration it is true of: in a run WIRED
+ * WITH A SESSION there are two refusals — `ControlLease` (via the gate) and the
+ * driver's own human-turn lock (`LiveSession.beginHumanTurn`, armed below BEFORE
+ * any banner is painted, so a banner that fails to render still leaves the
+ * session locked). They share no state, which is the point.
+ *
+ * `session` is OPTIONAL (see `EscalationDeps`), so "two refusals" is a property
+ * of the call site, not of this module. Which configurations have one, measured
+ * rather than assumed: `src/replay/main.ts` passes `session: driver`, so the
+ * production CLI gets both points. `tests/handoff.test.ts` and
+ * `tests/side-effect.test.ts` pass none, so the two suites carrying the most
+ * handoff assertions are exercising the SINGLE-point configuration — the lease
+ * alone. The independence of the two is proven instead by
+ * `tests/handoff.integration.test.ts`, which builds a naive lease that believes
+ * automation is driving and shows the driver refusing anyway. The
  * TARGET APP is not a third — but the reason has narrowed, and the old one has
  * expired. It used to be that every application route was a pure read, so there
  * was no mutating route for a third point to protect. There is one now
@@ -255,10 +265,33 @@ export const runEscalation = async (
     },
   );
 
-  if (session) await session.beginHumanTurn();
+  /** Did the driver lock actually arm? Decides which failure the journal names. */
+  let armed = false;
 
   let outcome: HandoffOutcome;
   try {
+    /**
+     * ARMING LIVES INSIDE THE GUARDED REGION, and that placement is the fix for
+     * a real hole rather than tidiness.
+     *
+     * `lease.cede()` has already run, so control is with the human from here.
+     * This line used to sit ABOVE the `try`, which meant a throw out of
+     * `beginHumanTurn()` escaped `runEscalation` with the lease still on
+     * "human", no `handoff.returned` line, and the emitted-versus-journalled
+     * reconciliation below never reached — a one-sided audit of control.
+     *
+     * Not hypothetical: `beginHumanTurn()` awaits `ensurePlumbing()`, whose
+     * `exposeBinding`/`addInitScript` calls reject on a closed or already-torn-
+     * down context. Reproduced against the real driver — closing the browser
+     * context and then calling it throws
+     * `browserContext.exposeBinding: Target page, context or browser has been
+     * closed` — so this throws from production code, not only from a stub.
+     */
+    if (session) {
+      await session.beginHumanTurn();
+      armed = true;
+    }
+
     outcome =
       transport === undefined
         ? { kind: "timeout" }
@@ -267,17 +300,25 @@ export const runEscalation = async (
             deadline(ttlMs).then((): HandoffOutcome => ({ kind: "timeout" })),
           ]);
   } catch (e) {
-    // A transport that THROWS is broken operator plumbing, not a disposition. The
-    // property that must survive it is that the session never stays stuck on a
-    // human who is not there, so control is restored and journalled before the
-    // error propagates.
-    if (session) await session.endHumanTurn();
+    // A transport that THROWS is broken operator plumbing, not a disposition; so
+    // is a driver lock that will not arm. The property that must survive either
+    // is that the session never stays stuck on a human who is not there, so
+    // control is restored and journalled before the error propagates.
+    //
+    // The clear-up is best-effort ON PURPOSE, and it is the one place that
+    // deliberately departs from `endHumanTurn`'s fail-closed ordering. If
+    // clearing the banner also fails, the DRIVER stays locked — which is the
+    // safe direction, since it keeps refusing automation — but the LEASE must
+    // still be restored and journalled, or the audit of control ends on a cede
+    // with no matching return. Letting a second failure here mask the first
+    // would trade a loud error for a silently stranded lease.
+    if (armed && session) await session.endHumanTurn().catch(() => {});
     lease.expire();
     transitionLine(
       "handoff.returned",
       NOBODY,
-      "transport_error",
-      "the operator channel to answer",
+      armed ? "transport_error" : "arming_error",
+      armed ? "the operator channel to answer" : "the driver to lock the session for a human turn",
       e instanceof Error ? e.message : String(e),
       { pausedMs: now() - pausedFrom, epoch: lease.epoch },
     );

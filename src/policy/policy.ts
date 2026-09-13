@@ -25,7 +25,23 @@ export const PolicyDocument = z.object({
   version: z.string(),
   /** Exact origins the agent may reach. Anything else is denied, including redirects. */
   allowedOrigins: z.array(z.string().url()).min(1),
-  /** Path prefixes denied even on an allowed origin. */
+  /**
+   * Path prefixes denied even on an allowed origin.
+   *
+   * CANNOT FIRE IN PRODUCTION AS WIRED, and that is worth stating here rather
+   * than leaving a reviewer to infer enforcement. `evaluate()` tests this against
+   * `req.url`, which is the page the session ALREADY OCCUPIES (see
+   * `ActionContext.url`), and no action verb carries a destination — so nothing
+   * the agent can issue ever asks for `/__admin/**`, and this rule never gets a
+   * chance to refuse one.
+   *
+   * What actually protects the admin plane is therefore structural, not this
+   * rule: there is no mechanism by which a capability can request a URL. The
+   * plan names controls, and `/__admin` has no control on any rendered screen.
+   * This entry is the belt to that structure's braces — it would refuse an agent
+   * that had somehow come to be STANDING on an admin route — and it is what a
+   * reviewer reads to see the intent declared. It is not the enforcement.
+   */
   deniedRoutes: z.array(z.string()).default([]),
   /** The only action kinds permitted at all. */
   allowedActions: z.array(z.enum(["navigate", "click", "fill", "press", "accept_dialog", "dismiss_dialog"])).min(1),
@@ -47,7 +63,23 @@ export const PolicyDocument = z.object({
     reversible: z.enum(["allow", "confirm", "block"]),
     irreversible: z.enum(["allow", "confirm", "block"]),
   }),
-  /** Hard ceiling on a single run, so a loop cannot grind forever. */
+  /**
+   * The run-level ceiling, DECLARED here and deliberately not read by `evaluate()`.
+   *
+   * A per-action decision cannot see a run-level count, so enforcing it here is
+   * structurally impossible — the reader has to be whatever owns the loop, and
+   * both loops now read it. `src/replay/main.ts` takes `maxRunSeconds` as the
+   * executor's `budgets.runMs`; `src/discover/main.ts` takes both `maxSteps` and
+   * `maxRunSeconds` as the discovery `StopController`'s limits. So changing this
+   * file changes how long a run may take, which is what makes it a policy rather
+   * than documentation.
+   *
+   * WHAT IS STILL NOT SOURCED FROM HERE: the replay CLI's per-STEP budget, which
+   * remains its own constant. `maxSteps` likewise binds only discovery — replay
+   * walks whatever the artifact declares and is bounded by the wall clock, not by
+   * a step count. A reviewer reading this record should not infer that every
+   * number in it constrains every run.
+   */
   caps: z.object({ maxSteps: z.number().int().positive(), maxRunSeconds: z.number().int().positive() }),
 });
 

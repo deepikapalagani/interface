@@ -8,8 +8,9 @@
  * This test is that sentence, executed:
  *
  *   1. a loop drives the REAL mock through a REAL browser and records a trace;
- *   2. the compiler turns that trace — never the transcript — into an artifact;
- *   3. the schema accepts it, with all eight safety refinements applied;
+ *   2. the compiler turns that trace — never the transcript — into an artifact,
+ *      rating every step against the SHIPPED risk profile;
+ *   3. the schema accepts it, with all twelve safety refinements applied;
  *   4. `replay()` executes that artifact against the app and reaches its
  *      checkpoint, with zero model calls.
  *
@@ -18,6 +19,11 @@
  * frameset, the minting of durable targets from refs, the schema, the gate, and
  * the replay engine. A genuine model-driven run is a separate exercise; this
  * proves the machinery it feeds.
+ *
+ * THE PORT IS EPHEMERAL, and that is not a detail. This suite used to bind 7111
+ * with no listen error handler, so it was green on a clean machine and failed
+ * with EADDRINUSE on a busy one — including against a reviewer who happened to
+ * have something on that port. The repo's own scripts bind port 0; so does this.
  */
 import type { Server } from "node:http";
 import { readFileSync } from "node:fs";
@@ -29,6 +35,7 @@ import { tenantA } from "../mock/tenant.js";
 import { Binding } from "../src/capability/bind.js";
 import { safeParseCapability } from "../src/capability/schema.js";
 import { compileMechanical } from "../src/compile/mechanical.js";
+import { DEFAULT_RISK_PROFILE_PATH, loadRiskProfile } from "../src/compile/risk-profile.js";
 import { ControlLease } from "../src/control/lease.js";
 import { runDiscovery } from "../src/discover/loop.js";
 import { EventSequencer } from "../src/evidence/events.js";
@@ -39,20 +46,24 @@ import { BoundSurface } from "../src/surface/bound.js";
 import { GatedSurface } from "../src/surface/gated.js";
 import { PlaywrightSurface } from "../src/surface/playwright.js";
 
-const PORT = 7111;
-const ENTRY = `http://localhost:${PORT}/`;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const binding = Binding.parse(JSON.parse(readFileSync(path.join(here, "fixtures", "fcu@4.2.json"), "utf8")));
+/** The profile the shipped CLI loads. Using it here is also what pins that it covers this flow. */
+const riskProfile = loadRiskProfile(DEFAULT_RISK_PROFILE_PATH);
 
-const policy = PolicyDocument.parse({
-  version: "1.0.0",
-  allowedOrigins: [ENTRY.replace(/\/$/, "")],
-  deniedRoutes: ["/__admin"],
-  allowedActions: ["navigate", "click", "fill", "press", "dismiss_dialog"],
-  screenRules: [],
-  riskHandling: { read_only: "allow", reversible: "allow", irreversible: "confirm" },
-  caps: { maxSteps: 40, maxRunSeconds: 60 },
-});
+let server: Server;
+let entry: string;
+
+const policyFor = (target: string): PolicyDocument =>
+  PolicyDocument.parse({
+    version: "1.0.0",
+    allowedOrigins: [target.replace(/\/$/, "")],
+    deniedRoutes: ["/__admin"],
+    allowedActions: ["navigate", "click", "fill", "press", "dismiss_dialog"],
+    screenRules: [],
+    riskHandling: { read_only: "allow", reversible: "allow", irreversible: "confirm" },
+    caps: { maxSteps: 40, maxRunSeconds: 60 },
+  });
 
 /**
  * Stands in for the model. It cannot know refs in advance — they are minted per
@@ -99,10 +110,6 @@ class ScriptedModel implements ModelProvider {
       stopReason: "tool_calls",
     };
   }
-
-  async parseJson(): Promise<{ value: unknown; usage: Usage }> {
-    return { value: {}, usage: { promptTokens: 0, completionTokens: 0 } };
-  }
 }
 
 const stack = (driver: PlaywrightSurface) => {
@@ -113,14 +120,15 @@ const stack = (driver: PlaywrightSurface) => {
     now: () => new Date().toISOString(),
     controlOwner: () => lease.holder,
   });
-  return { lease, log, surface: new GatedSurface(new BoundSurface(driver, binding), policy, lease) };
+  return { lease, log, surface: new GatedSurface(new BoundSurface(driver, binding), policyFor(entry), lease) };
 };
-
-let server: Server;
 
 beforeAll(async () => {
   server = createServer(tenantA);
-  await new Promise<void>((resolve) => server.listen(PORT, resolve));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  entry = `http://localhost:${port}/`;
 }, 60000);
 
 afterAll(() => server?.close());
@@ -128,7 +136,7 @@ afterAll(() => server?.close());
 describe("discover -> compile -> replay", () => {
   it("records a run, compiles it into a valid artifact, and replays that artifact", async () => {
     // ---- 1. DISCOVER -------------------------------------------------------
-    await fetch(`${ENTRY}__admin/reset`, { method: "POST" });
+    await fetch(`${entry}__admin/reset`, { method: "POST" });
     // Picks controls the way a model now can: by the label rendered beside them.
     // Matching a bare role would reach for the nav frame's quick-lookup box,
     // which is indistinguishable from the member-id field without its label.
@@ -138,7 +146,7 @@ describe("discover -> compile -> replay", () => {
       { tool: "finish", args: { summary: "member located", checkpoint: "the results grid is showing" } },
     ]);
 
-    const driver = await PlaywrightSurface.launch(ENTRY, { headed: false });
+    const driver = await PlaywrightSurface.launch(entry, { headed: false });
     let discovery;
     try {
       const { surface } = stack(driver);
@@ -147,6 +155,7 @@ describe("discover -> compile -> replay", () => {
         surface,
         actor: () => "automation" as const,
         epoch: () => 0,
+        riskProfile,
       });
     } finally {
       await driver.close();
@@ -174,8 +183,8 @@ describe("discover -> compile -> replay", () => {
       model: model.id,
       appProfileVersion: "meridian-msc@4.2",
       discoveredAt: "2026-09-12T00:00:00Z",
-      finishCheckpoint: "the results grid is showing",
       binding,
+      riskProfile,
     });
 
     // ---- 3. THE SCHEMA MUST ACCEPT IT --------------------------------------
@@ -190,9 +199,16 @@ describe("discover -> compile -> replay", () => {
     expect(parsed.data.provenance.traceDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(parsed.data.verification.replayResult).toBe("not_yet_verified");
 
+    // The plan speaks SYMBOLS, resolved from the literals minting recorded.
+    expect(parsed.data.plan.targets.map((t) => t.id).sort()).toEqual(["MEMBER_ID", "SUBMIT"]);
+    // Risk came from the profile, which rates this flow's screen read_only, and
+    // refinement 7 forces the contract to equal the maximum over the steps.
+    expect(parsed.data.plan.steps.every((s) => s.risk === "read_only")).toBe(true);
+    expect(parsed.data.contract.risk).toBe("read_only");
+
     // ---- 4. REPLAY THE COMPILED ARTIFACT ------------------------------------
-    await fetch(`${ENTRY}__admin/reset`, { method: "POST" });
-    const replayDriver = await PlaywrightSurface.launch(ENTRY, { headed: false });
+    await fetch(`${entry}__admin/reset`, { method: "POST" });
+    const replayDriver = await PlaywrightSurface.launch(entry, { headed: false });
     try {
       const { lease, log, surface } = stack(replayDriver);
       const result = await replay(parsed.data, binding, {}, {

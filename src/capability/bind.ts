@@ -29,6 +29,11 @@ export const Binding = z.object({
   tenant: z.string().min(1),
   /** The app version this binding was written against, for drift attribution. */
   appVersion: z.string().min(1),
+  /**
+   * The two frames this product renders, by the ROLE each plays. A recorded
+   * target's frame hop names the role — `content` or `nav` — and `resolveTarget`
+   * turns it into this tenant's own frame name.
+   */
   frames: z.object({ content: z.string().min(1), nav: z.string().min(1) }),
   /** SYMBOL -> the screen id this tenant renders. */
   screens: z.record(z.string(), z.string()),
@@ -41,6 +46,17 @@ export const Binding = z.object({
 export type Binding = z.infer<typeof Binding>;
 
 /**
+ * The two frame roles an artifact may name.
+ *
+ * A closed pair rather than an open table, and the limit is worth stating: this
+ * product renders exactly two frames, so a recorded path is one hop deep and a
+ * role is enough to identify it. A surface with NESTED framesets would need a
+ * path of roles, and neither this function nor `PlaywrightSurface.resolveFrame`'s
+ * single-hop walk would be sufficient.
+ */
+export type FrameRole = "content" | "nav";
+
+/**
  * A binding must be reversible, so duplicate literals are refused.
  *
  * Translation runs in BOTH directions: symbol to literal when resolving a plan,
@@ -51,6 +67,21 @@ export type Binding = z.infer<typeof Binding>;
  * some other tenant months later.
  *
  * Making the collision unrepresentable is cheaper than handling it.
+ */
+/**
+ * ── THE COST OF FLAT TABLES, STATED RATHER THAN DESIGNED AROUND ─────────────
+ *
+ * `fields` and `labels` are global to a tenant, so a symbol means one literal
+ * everywhere in the product. A tenant whose search screen and card screen each
+ * carry a control named `SUBMIT` cannot be RECORDED: the second one collides with
+ * the first under the reversibility rule below, and there is no per-screen
+ * namespace to separate them. The `fcu` fixture designs around this by giving the
+ * card screen's submit its own name (`APPLY`), which is a property of the mock
+ * rather than a solution.
+ *
+ * The fix is a per-screen override layer — `screens[MEMBER_SEARCH].fields.SUBMIT`
+ * shadowing the global — and it is NOT built. It would also be where per-tenant
+ * drift patches live, so it is the same piece of work in both directions.
  */
 export const BindingChecked = Binding.superRefine((binding, ctx) => {
   for (const table of ["screens", "fields", "labels"] as const) {
@@ -73,7 +104,7 @@ export const parseBinding = (raw: unknown): Binding => BindingChecked.parse(raw)
 
 export class UnboundSymbol extends Error {
   constructor(
-    readonly kind: "screen" | "field" | "label",
+    readonly kind: "screen" | "field" | "label" | "frame",
     readonly symbol: string,
     readonly tenant: string,
   ) {
@@ -87,7 +118,7 @@ export class UnboundSymbol extends Error {
 
 const need = (
   table: Readonly<Record<string, string>>,
-  kind: "screen" | "field" | "label",
+  kind: "screen" | "field" | "label" | "frame",
   symbol: string,
   tenant: string,
 ): string => {
@@ -132,6 +163,36 @@ export const canonicalLabel = (binding: Binding, literal: string | null): string
   canonical(binding.labels, literal);
 
 /**
+ * The frame a control was found in, as the ROLE it plays for this tenant.
+ *
+ * Minting records the frame's own name — `content` on tenant A, `main` on tenant
+ * B — and an artifact must not carry either. `null` for anything this binding
+ * does not name, which the compiler treats as drift rather than passing through.
+ */
+export const canonicalFrame = (binding: Binding, literal: string | null): FrameRole | null => {
+  if (literal === null) return null;
+  if (literal === binding.frames.content) return "content";
+  if (literal === binding.frames.nav) return "nav";
+  return null;
+};
+
+/**
+ * A recorded frame role, as this tenant's own frame name.
+ *
+ * Every named hop used to be rewritten to `frames.content` unconditionally, so
+ * `frames.nav` — a REQUIRED field of the schema above — had no reader anywhere in
+ * `src`, and a target recorded in the navigation frame resolved against the
+ * content frame with no error at all. On this surface that is not hypothetical:
+ * the nav frame carries a quick-lookup box using the SAME field name as the
+ * member-id field, which is the collision the frame hop exists to break.
+ */
+const frameLiteral = (binding: Binding, role: string): string => {
+  if (role === "content") return binding.frames.content;
+  if (role === "nav") return binding.frames.nav;
+  throw new UnboundSymbol("frame", role, binding.tenant);
+};
+
+/**
  * Rewrite a recorded target for one tenant: its frame path, its screen
  * assertion, and each strategy's key.
  *
@@ -143,10 +204,7 @@ export const canonicalLabel = (binding: Binding, literal: string | null): string
 export const resolveTarget = (target: TargetDescriptor, binding: Binding): TargetDescriptor => ({
   ...target,
   screen: need(binding.screens, "screen", target.screen, binding.tenant),
-  framePath: target.framePath.map((hop) => ({
-    ...hop,
-    ...(hop.name ? { name: binding.frames.content } : {}),
-  })),
+  framePath: target.framePath.map((hop) => (hop.name === undefined ? hop : { ...hop, name: frameLiteral(binding, hop.name) })),
   strategies: target.strategies.map((s) => ({
     ...s,
     key:
