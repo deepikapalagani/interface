@@ -82,6 +82,11 @@ Start the app in one terminal:
 npm run mock          # http://localhost:7101/
 ```
 
+`npm run mock:b` starts a second tenant on :7102 — the same vendor product with both frames renamed, the
+member-id field renamed, and an extra leading column in the results grid, so anything reading that grid by
+position reads the wrong cell. It is what the binding layer is checked against. No committed run replays
+against it; see `REPORT.md` → Heterogeneity for that honest limit.
+
 **1. Run the agent on a goal**
 
 ```bash
@@ -134,7 +139,7 @@ npm run replay -- \
 ```
 
 Prints a typed result and exits 0 for success or an expected business outcome, 1 for a hard failure.
-Every replay records `modelCalls: 0`.
+Every replay records zero model calls in its manifest, under `model.calls`.
 
 ## Replay with parameters
 
@@ -167,9 +172,10 @@ Its committing step is `reversible`, which the shipped policy allows, so it runs
 against the app's own audit trail at <http://localhost:7101/screen/audit>, then `npm run mock:reset`.
 
 `report_lost@1.0.0` is the same flow with an `irreversible` step. The shipped policy rates irreversible
-actions `confirm`, so it escalates to a person instead of running. The artifact cannot route around
-that: the schema forbids a `secret` input, so it is structurally unable to carry the supervisor override
-the app demands.
+actions `confirm`, so it escalates to a person instead of running. Two things hold that: the capability
+declares no override input, and the policy rates the step. Be precise about the schema's part — it forbids
+only a `secret`-classified input, so a hand-authored artifact could declare an override as `confidential`
+and parse. The guarantee is this capability's shape plus the policy, not a structural impossibility.
 
 ## Fault injection
 
@@ -186,8 +192,8 @@ npm run mock:fault -- --clear
 What each fault does to the app, and what a replay against it is expected to return, is stated in
 **one** place — `scripts/fault.ts` — and `--run` compares a real replay against it, in the result *and*
 in the app's own audit trail. It exits non-zero on any mismatch and names the mechanism the expectation
-rested on. This file used to restate those outcomes itself, and all three copies said the same wrong
-thing; restating them here is what let them drift.
+rested on. One source, deliberately: when the README and the mock each kept their own copy of what a
+fault should do, all three drifted apart and agreed on the wrong answer.
 
 `--run confirm_submit` and `--run abend_after_commit` pass. **`--run broadcast` currently fails, and that
 is deliberate**: its declared expectation is the designed behaviour, and the run does not reliably reach
@@ -224,16 +230,11 @@ control. Do the step in the browser that is already open, then hand control back
 :7900**.
 
 The in-page banner renders, and so does its **HAND BACK** button — either door ends the turn, because
-both resolve the same promise the run is blocked on. Measured on 2026-09-13 against a live mock through
-the public `Surface` API: before the handoff neither the banner text nor the button is present; during
-it, `AUTOMATION IS PAUSED` is on screen and two `HAND BACK` buttons appear in the accessibility tree (one
-per paintable frame of the frameset); after hand-back both are gone.
-
-This paragraph previously said the opposite. The banner genuinely did not render — tsx's transpiler
-rewrote the painting function to call a helper absent from the page, and a bare catch swallowed the
-`ReferenceError` — and the fix and this file were written in the same pass, so the documentation briefly
-described the defect rather than the repair. The control transfer underneath was real throughout, and
-`tests/handoff.integration.test.ts` proves the same-session property headlessly.
+both resolve the same promise the run is blocked on. Measured against a live mock through the public
+`Surface` API: before the handoff neither the banner text nor the button is present; during it,
+`AUTOMATION IS PAUSED` is on screen and two `HAND BACK` buttons appear in the accessibility tree (one per
+paintable frame of the frameset); after hand-back both are gone. `tests/handoff.integration.test.ts`
+proves the same-session property headlessly.
 
 ## Verify
 
@@ -244,7 +245,7 @@ npm run verify
 | command | what it proves |
 | --- | --- |
 | `npm run typecheck` | strict TypeScript, clean |
-| `npm run test` | 327 tests across 28 files |
+| `npm run test` | 335 tests across 29 files |
 | `npm run verify:no-llm` | walks the import graph from both replay entry points and fails if it can reach a model SDK, `src/model/`, `src/discover/` or `src/compile/`. Reads static imports, `import()` with a literal specifier, and refuses any `import()` whose specifier is not a literal |
 | `npm run verify:evidence` | every run under `/evidence/` is complete, internally consistent, and free of the seeded PII literals and the leak shapes |
 | `npm run verify:determinism` | replays 4 scenarios twice as `reset → run`, byte-comparing evidence after projecting away timestamps and run ids |
@@ -300,6 +301,10 @@ snapshot or a trace; this is the second.
 - **A queued native dialog is not bounded at every driver entry point.** `observe`, `locate`, `read` and
   `act` check for one first; `launch`'s initial navigation and `describe` do not. That is the mechanism
   behind the `broadcast` fault being intermittent rather than reliable — see `npm run mock:fault -- --list`.
+- **The policy gate does not constrain a human turn.** `humanAction()` reaches the driver directly, and
+  read paths are ungated, so the allowlist's "one action's worth of exposure" bound does not hold while a
+  person is driving, or when a capability's last step is a `read`. Defensible — the person is the
+  authority — but it is not what "one chokepoint" implies. See `REPORT.md` → Cuts.
 
 `REPORT.md` covers the design. `DECISIONS.md` records each decision as it was made, with the
 measurements behind it, including the ones that turned out wrong.
